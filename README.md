@@ -60,6 +60,9 @@ Each notebook has a `schema.yaml` that defines entry types and custom fields.
 bundled templates, or use `lab-notebook init --template <name>` to start with a
 specific one.
 
+The default template (`research-notebook`) includes basic fields. You can add
+more to your `schema.yaml`:
+
 ```yaml
 types:
   - observation
@@ -73,9 +76,9 @@ fields:
   branch:     {type: text}
   tags:       {type: list}
   artifacts:  {type: list}
-  dataset:    {type: text, fts: true}
-  gpu_hours:  {type: real}
-  num_nodes:  {type: integer}
+  dataset:    {type: text, fts: true}   # additional field
+  gpu_hours:  {type: real}              # additional field
+  num_nodes:  {type: integer}           # additional field
 ```
 
 **Field types:** `text`, `integer`, `real`, `list` (list is comma-separated on
@@ -124,11 +127,12 @@ Regenerate `index.sqlite` from `schema.yaml` and all `entries/*.jsonl` files.
 
 List active research contexts with entry counts and date ranges.
 
-### `template [name]`
+### `template [name] [--force]`
 
 List or apply bundled schema templates. With no argument, lists available
 templates. With a name, copies that template to the current notebook's
-`schema.yaml`.
+`schema.yaml` (requires `--force` if `schema.yaml` already exists).
+Run `lab-notebook rebuild` afterward if entries exist.
 
 ## Data Layout
 

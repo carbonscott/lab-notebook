@@ -8,7 +8,7 @@ Usage:
     lab-notebook schema
     lab-notebook rebuild
     lab-notebook contexts
-    lab-notebook template [name]
+    lab-notebook template [name] [--force]
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ import sqlite3
 import sys
 from collections import namedtuple
 from datetime import datetime
+from importlib.resources import files
 from pathlib import Path
 
 import yaml
@@ -169,12 +170,16 @@ def build_sql(schema: dict) -> SchemaSQL:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def get_notebook_dir() -> Path:
+def get_notebook_dir(hint: str = "") -> Path:
     d = os.environ.get("LAB_NOTEBOOK_DIR")
     if d:
         return Path(d)
     print("Error: LAB_NOTEBOOK_DIR environment variable is not set.", file=sys.stderr)
-    print("Run 'lab-notebook init' to create a notebook, then source the .env file.", file=sys.stderr)
+    if hint:
+        print(hint, file=sys.stderr)
+    else:
+        print("Run 'lab-notebook init' to create a notebook, then source the .env file.",
+              file=sys.stderr)
     sys.exit(1)
 
 
@@ -302,7 +307,7 @@ def print_table(cursor: sqlite3.Cursor) -> None:
     print(f"\n({len(rows)} row{'s' if len(rows) != 1 else ''})")
 
 
-SCHEMAS_DIR = Path(__file__).parent / "schemas"
+SCHEMAS_DIR = Path(str(files("lab_notebook").joinpath("schemas")))
 DEFAULT_TEMPLATE = "research-notebook"
 
 
@@ -315,7 +320,7 @@ def list_templates() -> list[tuple[str, str]]:
         with open(p) as f:
             first = f.readline().strip()
             if first.startswith("#"):
-                desc = first.lstrip("# ").rstrip(".")
+                desc = first.removeprefix("# ").rstrip(".")
         templates.append((name, desc))
     return templates
 
@@ -323,6 +328,8 @@ def list_templates() -> list[tuple[str, str]]:
 def get_template_path(name: str) -> Path | None:
     """Return path to a bundled template, or None if not found."""
     p = SCHEMAS_DIR / f"{name}.yaml"
+    if not p.resolve().is_relative_to(SCHEMAS_DIR.resolve()):
+        return None
     return p if p.exists() else None
 
 
@@ -339,6 +346,10 @@ def read_template(name: str) -> str:
 
 def print_templates() -> None:
     """Print available templates to stdout."""
+    if not SCHEMAS_DIR.is_dir():
+        print("Error: schemas directory not found. Installation may be corrupt.",
+              file=sys.stderr)
+        sys.exit(1)
     templates = list_templates()
     if not templates:
         print("No templates found.")
@@ -380,8 +391,15 @@ def cmd_init(args: argparse.Namespace) -> None:
             f.write("index.sqlite\n")
 
     sf = target / "schema.yaml"
+    template_explicit = getattr(args, "template", None) is not None
     if not sf.exists():
         sf.write_text(read_template(template_name))
+        schema_msg = f"from template: {template_name}"
+    elif template_explicit:
+        sf.write_text(read_template(template_name))
+        schema_msg = f"from template: {template_name} (overwritten)"
+    else:
+        schema_msg = "already exists (kept)"
 
     writer = os.environ.get("USER", "unknown")
     env_file = target / ".env"
@@ -392,7 +410,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     print(f"Initialized lab notebook in {target}")
     print(f"  entries/       per-writer JSONL files")
-    print(f"  schema.yaml    from template: {template_name}")
+    print(f"  schema.yaml    {schema_msg}")
     print(f"  .gitignore     ignores index.sqlite")
     print(f"  .env           LAB_NOTEBOOK_DIR={target}")
     print(f"                 LAB_NOTEBOOK_WRITER={writer}")
@@ -553,9 +571,13 @@ def cmd_template(args: argparse.Namespace) -> None:
         print_templates()
         return
 
-    notebook_dir = get_notebook_dir()
+    notebook_dir = get_notebook_dir(
+        hint="Source the notebook's .env file, or run 'lab-notebook init' first.")
     schema_content = read_template(args.name)
     sf = notebook_dir / "schema.yaml"
+    if sf.exists() and not args.force:
+        print(f"Error: {sf} already exists. Use --force to overwrite.", file=sys.stderr)
+        sys.exit(1)
     sf.write_text(schema_content)
     print(f"Applied template '{args.name}' to {sf}")
 
@@ -636,6 +658,8 @@ def main() -> None:
     p_template = sub.add_parser("template", help="List or apply schema templates")
     p_template.add_argument("name", nargs="?", default=None,
                             help="Template name to apply (omit to list available)")
+    p_template.add_argument("--force", action="store_true",
+                            help="Overwrite existing schema.yaml")
     p_template.set_defaults(func=cmd_template)
 
     args = parser.parse_args()

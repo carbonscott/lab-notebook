@@ -17,12 +17,17 @@ from lab_notebook.cli import (
     cmd_search,
     cmd_schema,
     cmd_sql,
+    cmd_template,
     ensure_db,
     entries_dir,
+    get_template_path,
     index_path,
+    list_templates,
     load_schema,
     build_sql,
     flatten_entry,
+    print_templates,
+    read_template,
 )
 
 
@@ -31,7 +36,7 @@ def notebook(tmp_path, monkeypatch):
     """Initialize a notebook in a temp directory and set env vars."""
     target = tmp_path / "nb"
     target.mkdir()
-    args = argparse.Namespace(path=str(target))
+    args = argparse.Namespace(path=str(target), template=None)
     cmd_init(args)
     monkeypatch.setenv("LAB_NOTEBOOK_DIR", str(target))
     monkeypatch.setenv("LAB_NOTEBOOK_WRITER", "test-writer")
@@ -43,7 +48,7 @@ def custom_notebook(tmp_path, monkeypatch):
     """Initialize a notebook with a custom schema."""
     target = tmp_path / "nb"
     target.mkdir()
-    args = argparse.Namespace(path=str(target))
+    args = argparse.Namespace(path=str(target), template=None)
     cmd_init(args)
     # Overwrite schema.yaml with custom fields
     (target / "schema.yaml").write_text(
@@ -102,7 +107,7 @@ class TestInit:
     def test_creates_structure(self, tmp_path):
         target = tmp_path / "nb"
         target.mkdir()
-        args = argparse.Namespace(path=str(target))
+        args = argparse.Namespace(path=str(target), template=None)
         cmd_init(args)
 
         assert (target / "entries").is_dir()
@@ -116,7 +121,7 @@ class TestInit:
     def test_init_creates_schema_yaml(self, tmp_path):
         target = tmp_path / "nb"
         target.mkdir()
-        args = argparse.Namespace(path=str(target))
+        args = argparse.Namespace(path=str(target), template=None)
         cmd_init(args)
 
         sf = target / "schema.yaml"
@@ -130,7 +135,7 @@ class TestInit:
 
     def test_init_cwd(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        args = argparse.Namespace(path=None)
+        args = argparse.Namespace(path=None, template=None)
         cmd_init(args)
 
         assert (tmp_path / "entries").is_dir()
@@ -138,7 +143,7 @@ class TestInit:
         assert (tmp_path / "schema.yaml").exists()
 
     def test_init_nonexistent_dir(self, tmp_path):
-        args = argparse.Namespace(path=str(tmp_path / "does-not-exist"))
+        args = argparse.Namespace(path=str(tmp_path / "does-not-exist"), template=None)
         with pytest.raises(SystemExit):
             cmd_init(args)
 
@@ -537,3 +542,165 @@ class TestMultipleWriters:
         count = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
         conn.close()
         assert count == 2
+
+
+# ---------------------------------------------------------------------------
+# templates
+# ---------------------------------------------------------------------------
+
+
+class TestTemplateHelpers:
+    def test_list_templates(self):
+        templates = list_templates()
+        names = [t[0] for t in templates]
+        assert "research-notebook" in names
+        assert "ml-experiment-log" in names
+        assert len(templates) >= 2
+
+    def test_get_template_path_valid(self):
+        p = get_template_path("research-notebook")
+        assert p is not None
+        assert p.exists()
+
+    def test_get_template_path_invalid(self):
+        assert get_template_path("nonexistent") is None
+
+    def test_get_template_path_traversal(self):
+        assert get_template_path("../../etc/passwd") is None
+
+    def test_read_template_valid(self):
+        content = read_template("research-notebook")
+        assert "types:" in content
+        assert "observation" in content
+
+    def test_read_template_invalid(self):
+        with pytest.raises(SystemExit):
+            read_template("nonexistent")
+
+    def test_print_templates(self, capsys):
+        print_templates()
+        out = capsys.readouterr().out
+        assert "research-notebook" in out
+        assert "ml-experiment-log" in out
+
+    def test_templates_are_valid_yaml(self):
+        import yaml
+        for name, _ in list_templates():
+            content = read_template(name)
+            schema = yaml.safe_load(content)
+            assert isinstance(schema["types"], list)
+            assert len(schema["types"]) > 0
+            assert isinstance(schema.get("fields", {}), dict)
+
+
+class TestCmdTemplate:
+    def test_list_no_args(self, notebook, capsys):
+        args = argparse.Namespace(name=None, force=False)
+        cmd_template(args)
+        out = capsys.readouterr().out
+        assert "research-notebook" in out
+        assert "ml-experiment-log" in out
+
+    def test_apply_to_fresh_notebook(self, notebook, capsys):
+        # Remove existing schema.yaml to simulate fresh state
+        (notebook / "schema.yaml").unlink()
+        args = argparse.Namespace(name="ml-experiment-log", force=False)
+        cmd_template(args)
+        import yaml
+        schema = yaml.safe_load((notebook / "schema.yaml").read_text())
+        assert "run-start" in schema["types"]
+        assert "method" in schema["fields"]
+
+    def test_apply_existing_requires_force(self, notebook):
+        args = argparse.Namespace(name="ml-experiment-log", force=False)
+        with pytest.raises(SystemExit):
+            cmd_template(args)
+
+    def test_apply_force_overwrites(self, notebook, capsys):
+        args = argparse.Namespace(name="ml-experiment-log", force=True)
+        cmd_template(args)
+        import yaml
+        schema = yaml.safe_load((notebook / "schema.yaml").read_text())
+        assert "run-start" in schema["types"]
+
+    def test_invalid_name(self, notebook):
+        (notebook / "schema.yaml").unlink()
+        args = argparse.Namespace(name="nonexistent", force=False)
+        with pytest.raises(SystemExit):
+            cmd_template(args)
+
+    def test_rebuild_hint_with_entries(self, notebook, capsys):
+        # Create an entry so entries/ has jsonl files
+        cmd_emit(make_emit_args(content="An entry"))
+        # Remove schema and apply template with --force
+        args = argparse.Namespace(name="ml-experiment-log", force=True)
+        cmd_template(args)
+        out = capsys.readouterr().out
+        assert "rebuild" in out
+
+
+class TestInitTemplate:
+    def test_init_with_template(self, tmp_path):
+        target = tmp_path / "nb"
+        target.mkdir()
+        args = argparse.Namespace(path=str(target), template="ml-experiment-log")
+        cmd_init(args)
+        import yaml
+        schema = yaml.safe_load((target / "schema.yaml").read_text())
+        assert "run-start" in schema["types"]
+        assert "method" in schema["fields"]
+
+    def test_init_template_list(self, tmp_path, capsys):
+        args = argparse.Namespace(path=str(tmp_path), template="")
+        cmd_init(args)
+        out = capsys.readouterr().out
+        assert "research-notebook" in out
+        assert "ml-experiment-log" in out
+
+    def test_init_template_overwrites_existing(self, tmp_path):
+        target = tmp_path / "nb"
+        target.mkdir()
+        # First init with default
+        args = argparse.Namespace(path=str(target), template=None)
+        cmd_init(args)
+        import yaml
+        schema = yaml.safe_load((target / "schema.yaml").read_text())
+        assert "observation" in schema["types"]
+        # Re-init with explicit template
+        args = argparse.Namespace(path=str(target), template="ml-experiment-log")
+        cmd_init(args)
+        schema = yaml.safe_load((target / "schema.yaml").read_text())
+        assert "run-start" in schema["types"]
+
+    def test_init_no_template_keeps_existing(self, tmp_path):
+        target = tmp_path / "nb"
+        target.mkdir()
+        args = argparse.Namespace(path=str(target), template=None)
+        cmd_init(args)
+        # Overwrite schema with custom content
+        (target / "schema.yaml").write_text("types:\n  - custom\nfields:\n")
+        # Re-init without --template
+        args = argparse.Namespace(path=str(target), template=None)
+        cmd_init(args)
+        import yaml
+        schema = yaml.safe_load((target / "schema.yaml").read_text())
+        assert "custom" in schema["types"]
+
+    def test_init_output_reflects_reality(self, tmp_path, capsys):
+        target = tmp_path / "nb"
+        target.mkdir()
+        # First init
+        args = argparse.Namespace(path=str(target), template=None)
+        cmd_init(args)
+        out = capsys.readouterr().out
+        assert "from template: research-notebook" in out
+        # Re-init without template — should say "kept"
+        args = argparse.Namespace(path=str(target), template=None)
+        cmd_init(args)
+        out = capsys.readouterr().out
+        assert "already exists (kept)" in out
+        # Re-init with explicit template — should say "overwritten"
+        args = argparse.Namespace(path=str(target), template="ml-experiment-log")
+        cmd_init(args)
+        out = capsys.readouterr().out
+        assert "overwritten" in out
