@@ -229,7 +229,8 @@ class TestEmit:
         assert "id" in line
         assert "ts" in line
 
-        conn = sqlite3.connect(str(index_path(notebook)))
+        # Index is built lazily on query, not during emit
+        conn, _, _ = ensure_db(notebook)
         rows = conn.execute("SELECT content FROM entries").fetchall()
         conn.close()
         assert len(rows) == 1
@@ -273,7 +274,7 @@ class TestEmit:
         line = json.loads(writer_file.read_text().strip())
         assert line["dataset"] == "cifar10"
 
-        conn = sqlite3.connect(str(index_path(custom_notebook)))
+        conn, _, _ = ensure_db(custom_notebook)
         rows = conn.execute("SELECT dataset FROM entries").fetchall()
         conn.close()
         assert rows[0][0] == "cifar10"
@@ -285,7 +286,7 @@ class TestEmit:
         line = json.loads(writer_file.read_text().strip())
         assert line["gpu_hours"] == 4.5
 
-        conn = sqlite3.connect(str(index_path(custom_notebook)))
+        conn, _, _ = ensure_db(custom_notebook)
         rows = conn.execute("SELECT gpu_hours FROM entries").fetchall()
         conn.close()
         assert rows[0][0] == 4.5
@@ -312,7 +313,7 @@ class TestEmit:
         assert line["foo"] == "bar"
         assert line["num"] == "42"
 
-        conn = sqlite3.connect(str(index_path(notebook)))
+        conn, _, _ = ensure_db(notebook)
         rows = conn.execute("SELECT extra FROM entries").fetchall()
         conn.close()
         extra = json.loads(rows[0][0])
@@ -445,7 +446,7 @@ class TestRebuild:
         cmd_emit(make_emit_args(content="Persistent entry"))
 
         idx = index_path(notebook)
-        idx.unlink()
+        idx.unlink(missing_ok=True)
         assert not idx.exists()
 
         cmd_rebuild(argparse.Namespace())
@@ -461,7 +462,7 @@ class TestRebuild:
     def test_auto_rebuild_on_sql(self, notebook, capsys):
         cmd_emit(make_emit_args(content="Auto rebuild test"))
 
-        index_path(notebook).unlink()
+        index_path(notebook).unlink(missing_ok=True)
 
         cmd_sql(argparse.Namespace(query="SELECT content FROM entries"))
         out = capsys.readouterr().out
@@ -473,7 +474,7 @@ class TestRebuild:
         ))
 
         idx = index_path(custom_notebook)
-        idx.unlink()
+        idx.unlink(missing_ok=True)
 
         cmd_rebuild(argparse.Namespace())
         out = capsys.readouterr().out
@@ -486,9 +487,9 @@ class TestRebuild:
         assert rows[0][1] == 2.5
         assert rows[0][2] == "Custom rebuild"
 
-    def test_emit_after_schema_change_hints_rebuild(self, notebook, capsys):
+    def test_emit_after_schema_change_succeeds(self, notebook, capsys):
         cmd_emit(make_emit_args(content="Before schema change"))
-        # Add a new field to schema without rebuilding
+        # Add a new field to schema — emit no longer touches SQLite
         (notebook / "schema.yaml").write_text(
             "types:\n  - observation\nfields:\n"
             "  repo: {type: text}\n"
@@ -497,14 +498,17 @@ class TestRebuild:
             "  artifacts: {type: list}\n"
             "  new_field: {type: text}\n"
         )
-        with pytest.raises(SystemExit):
-            cmd_emit(make_emit_args(content="After schema change"))
-        err = capsys.readouterr().err
-        assert "rebuild" in err
-        # JSONL entry was still saved
+        # Emit succeeds (JSONL-only, no SQLite interaction)
+        cmd_emit(make_emit_args(content="After schema change"))
         writer_file = entries_dir(notebook) / "test-writer.jsonl"
         lines = writer_file.read_text().strip().split("\n")
         assert len(lines) == 2
+
+        # Query triggers lazy rebuild with new schema
+        conn, _, _ = ensure_db(notebook)
+        rows = conn.execute("SELECT content FROM entries ORDER BY ts").fetchall()
+        conn.close()
+        assert len(rows) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -523,7 +527,7 @@ class TestMultipleWriters:
         assert (edir / "test-writer.jsonl").exists()
         assert (edir / "writer-b.jsonl").exists()
 
-        conn = sqlite3.connect(str(index_path(notebook)))
+        conn, _, _ = ensure_db(notebook)
         rows = conn.execute("SELECT writer_id, content FROM entries ORDER BY writer_id").fetchall()
         conn.close()
         assert len(rows) == 2
@@ -535,7 +539,7 @@ class TestMultipleWriters:
         monkeypatch.setenv("LAB_NOTEBOOK_WRITER", "writer-b")
         cmd_emit(make_emit_args(content="Writer B entry"))
 
-        index_path(notebook).unlink()
+        index_path(notebook).unlink(missing_ok=True)
         cmd_rebuild(argparse.Namespace())
 
         conn = sqlite3.connect(str(index_path(notebook)))

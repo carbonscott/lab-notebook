@@ -242,12 +242,26 @@ def upsert_entry(conn: sqlite3.Connection, entry: dict, sql: SchemaSQL,
         conn.commit()
 
 
+def _index_is_stale(notebook_dir: Path, dbp: Path) -> bool:
+    """True if any JSONL file or schema.yaml is newer than the index."""
+    idx_mtime = dbp.stat().st_mtime
+    schema_file = notebook_dir / "schema.yaml"
+    if schema_file.exists() and schema_file.stat().st_mtime > idx_mtime:
+        return True
+    edir = entries_dir(notebook_dir)
+    if edir.exists():
+        for f in edir.glob("*.jsonl"):
+            if f.stat().st_mtime > idx_mtime:
+                return True
+    return False
+
+
 def ensure_db(notebook_dir: Path, schema: dict | None = None) -> tuple[sqlite3.Connection, dict, SchemaSQL]:
     if schema is None:
         schema = load_schema(notebook_dir)
     sql = build_sql(schema)
     dbp = index_path(notebook_dir)
-    needs_rebuild = not dbp.exists()
+    needs_rebuild = not dbp.exists() or _index_is_stale(notebook_dir, dbp)
     conn = sqlite3.connect(str(dbp))
     conn.executescript(sql.create)
     if needs_rebuild:
@@ -471,19 +485,6 @@ def cmd_emit(args: argparse.Namespace) -> None:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         f.flush()
         os.fsync(f.fileno())
-
-    # Update index
-    flat = flatten_entry(entry, schema)
-    conn, _, sql = ensure_db(notebook_dir, schema)
-    try:
-        upsert_entry(conn, flat, sql)
-    except sqlite3.OperationalError:
-        print("Error: SQLite schema is out of date. Run 'lab-notebook rebuild'.",
-              file=sys.stderr)
-        print("(The JSONL entry was saved successfully.)", file=sys.stderr)
-        sys.exit(1)
-    finally:
-        conn.close()
 
     print(f"[{entry['type']}] {entry['id']}  {entry['context']}")
 
