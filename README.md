@@ -4,24 +4,41 @@ Append-only lab notebook for tracking research across multiple repos.
 JSONL files are the git-tracked source of truth. SQLite + FTS5 is a
 disposable query index rebuilt on demand.
 
+## Installation
+
+```bash
+# From GitHub
+uv tool install git+https://github.com/carbonscott/lab-notebook
+
+# From a local clone
+uv tool install /path/to/lab-notebook
+
+# Or with pip
+pip install git+https://github.com/carbonscott/lab-notebook
+```
+
+To update after code changes:
+
+```bash
+uv tool install --force git+https://github.com/carbonscott/lab-notebook
+```
+
 ## Quick Start
 
 ```bash
 # 1. Create a notebook directory and initialize it
 mkdir /path/to/my-notebook
-uv run --script /path/to/lab-notebook.py init /path/to/my-notebook
+lab-notebook init /path/to/my-notebook
 
 # 2. Source the .env (sets LAB_NOTEBOOK_DIR and LAB_NOTEBOOK_WRITER)
 source /path/to/my-notebook/.env
 
 # 3. Write an entry
-uv run --script /path/to/lab-notebook.py emit \
-    --context maxie/ssl-comparison --type observation \
+lab-notebook emit --context maxie/ssl-comparison --type observation \
     "MAE with 75% masking spends most capacity on background."
 
 # 4. Query
-uv run --script /path/to/lab-notebook.py sql \
-    "SELECT ts, type, substr(content,1,80) FROM entries ORDER BY ts DESC LIMIT 10"
+lab-notebook sql "SELECT ts, type, substr(content,1,80) FROM entries ORDER BY ts DESC LIMIT 10"
 ```
 
 ## Environment Variables
