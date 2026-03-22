@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from lab_notebook.cli import (
+    _index_is_stale,
     cmd_contexts,
     cmd_emit,
     cmd_init,
@@ -509,6 +510,37 @@ class TestRebuild:
         rows = conn.execute("SELECT content FROM entries ORDER BY ts").fetchall()
         conn.close()
         assert len(rows) == 2
+
+
+# ---------------------------------------------------------------------------
+# staleness detection
+# ---------------------------------------------------------------------------
+
+
+class TestStaleness:
+    def test_stale_after_new_entry(self, notebook):
+        ensure_db(notebook)
+        cmd_emit(make_emit_args(content="New entry"))
+        assert _index_is_stale(notebook, index_path(notebook))
+
+    def test_fresh_after_rebuild(self, notebook):
+        cmd_emit(make_emit_args(content="An entry"))
+        ensure_db(notebook)
+        # Rebuild just happened — touch the index to ensure it's strictly newer
+        import time
+        time.sleep(0.05)
+        idx = index_path(notebook)
+        idx.touch()
+        assert not _index_is_stale(notebook, idx)
+
+    def test_stale_after_schema_change(self, notebook):
+        ensure_db(notebook)
+        import time
+        time.sleep(0.05)
+        (notebook / "schema.yaml").write_text(
+            (notebook / "schema.yaml").read_text() + "\n# modified\n"
+        )
+        assert _index_is_stale(notebook, index_path(notebook))
 
 
 # ---------------------------------------------------------------------------
