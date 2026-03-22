@@ -1,13 +1,14 @@
 """Lab notebook: append-only JSONL entries + SQLite query index.
 
 Usage:
-    lab-notebook init [path]
+    lab-notebook init [path] [--template NAME]
     lab-notebook emit --context X --type Y "content"
     lab-notebook sql "SELECT ..."
     lab-notebook search "query"
     lab-notebook schema
     lab-notebook rebuild
     lab-notebook contexts
+    lab-notebook template [name] [--force]
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ import sqlite3
 import sys
 from collections import namedtuple
 from datetime import datetime
+from importlib.resources import files
 from pathlib import Path
 
 import yaml
@@ -168,12 +170,16 @@ def build_sql(schema: dict) -> SchemaSQL:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def get_notebook_dir() -> Path:
+def get_notebook_dir(hint: str = "") -> Path:
     d = os.environ.get("LAB_NOTEBOOK_DIR")
     if d:
         return Path(d)
     print("Error: LAB_NOTEBOOK_DIR environment variable is not set.", file=sys.stderr)
-    print("Run 'lab-notebook init' to create a notebook, then source the .env file.", file=sys.stderr)
+    if hint:
+        print(hint, file=sys.stderr)
+    else:
+        print("Run 'lab-notebook init' to create a notebook, then source the .env file.",
+              file=sys.stderr)
     sys.exit(1)
 
 
@@ -301,20 +307,57 @@ def print_table(cursor: sqlite3.Cursor) -> None:
     print(f"\n({len(rows)} row{'s' if len(rows) != 1 else ''})")
 
 
-DEFAULT_SCHEMA_YAML = """\
-types:
-  - observation
-  - decision
-  - dead-end
-  - question
-  - milestone
+SCHEMAS_DIR = Path(str(files("lab_notebook").joinpath("schemas")))
+DEFAULT_TEMPLATE = "research-notebook"
 
-fields:
-  repo:       {type: text}
-  branch:     {type: text}
-  tags:       {type: list}
-  artifacts:  {type: list}
-"""
+
+def list_templates() -> list[tuple[str, str]]:
+    """Return [(name, description)] for each .yaml in the bundled schemas dir."""
+    templates = []
+    for p in sorted(SCHEMAS_DIR.glob("*.yaml")):
+        name = p.stem
+        desc = ""
+        with open(p) as f:
+            first = f.readline().strip()
+            if first.startswith("#"):
+                desc = first.removeprefix("# ").rstrip(".")
+        templates.append((name, desc))
+    return templates
+
+
+def get_template_path(name: str) -> Path | None:
+    """Return path to a bundled template, or None if not found."""
+    p = SCHEMAS_DIR / f"{name}.yaml"
+    if not p.resolve().is_relative_to(SCHEMAS_DIR.resolve()):
+        return None
+    return p if p.exists() else None
+
+
+def read_template(name: str) -> str:
+    """Read a bundled template by name, or exit with error."""
+    p = get_template_path(name)
+    if p is None:
+        names = [t[0] for t in list_templates()]
+        print(f"Error: unknown template '{name}'. Available: {', '.join(names)}",
+              file=sys.stderr)
+        sys.exit(1)
+    return p.read_text()
+
+
+def print_templates() -> None:
+    """Print available templates to stdout."""
+    if not SCHEMAS_DIR.is_dir():
+        print("Error: schemas directory not found. Installation may be corrupt.",
+              file=sys.stderr)
+        sys.exit(1)
+    templates = list_templates()
+    if not templates:
+        print("No templates found.")
+        return
+    print("Available templates:")
+    for name, desc in templates:
+        suffix = f" — {desc}" if desc else ""
+        print(f"  {name}{suffix}")
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +365,11 @@ fields:
 # ---------------------------------------------------------------------------
 
 def cmd_init(args: argparse.Namespace) -> None:
+    # --template with no value: list templates and exit
+    if hasattr(args, "template") and args.template == "":
+        print_templates()
+        return
+
     target = Path(args.path or ".").resolve()
     if not target.exists():
         print(f"Error: directory does not exist: {target}", file=sys.stderr)
@@ -329,6 +377,8 @@ def cmd_init(args: argparse.Namespace) -> None:
     if not target.is_dir():
         print(f"Error: not a directory: {target}", file=sys.stderr)
         sys.exit(1)
+
+    template_name = getattr(args, "template", None) or DEFAULT_TEMPLATE
 
     edir = target / "entries"
     edir.mkdir(exist_ok=True)
@@ -341,8 +391,15 @@ def cmd_init(args: argparse.Namespace) -> None:
             f.write("index.sqlite\n")
 
     sf = target / "schema.yaml"
+    template_explicit = getattr(args, "template", None) is not None
     if not sf.exists():
-        sf.write_text(DEFAULT_SCHEMA_YAML)
+        sf.write_text(read_template(template_name))
+        schema_msg = f"from template: {template_name}"
+    elif template_explicit:
+        sf.write_text(read_template(template_name))
+        schema_msg = f"from template: {template_name} (overwritten)"
+    else:
+        schema_msg = "already exists (kept)"
 
     writer = os.environ.get("USER", "unknown")
     env_file = target / ".env"
@@ -353,7 +410,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     print(f"Initialized lab notebook in {target}")
     print(f"  entries/       per-writer JSONL files")
-    print(f"  schema.yaml    field definitions")
+    print(f"  schema.yaml    {schema_msg}")
     print(f"  .gitignore     ignores index.sqlite")
     print(f"  .env           LAB_NOTEBOOK_DIR={target}")
     print(f"                 LAB_NOTEBOOK_WRITER={writer}")
@@ -509,6 +566,26 @@ def cmd_contexts(args: argparse.Namespace) -> None:
         conn.close()
 
 
+def cmd_template(args: argparse.Namespace) -> None:
+    if not args.name:
+        print_templates()
+        return
+
+    notebook_dir = get_notebook_dir(
+        hint="Source the notebook's .env file, or run 'lab-notebook init' first.")
+    schema_content = read_template(args.name)
+    sf = notebook_dir / "schema.yaml"
+    if sf.exists() and not args.force:
+        print(f"Error: {sf} already exists. Use --force to overwrite.", file=sys.stderr)
+        sys.exit(1)
+    sf.write_text(schema_content)
+    print(f"Applied template '{args.name}' to {sf}")
+
+    has_entries = any((notebook_dir / "entries").glob("*.jsonl")) if (notebook_dir / "entries").exists() else False
+    if has_entries:
+        print("Run 'lab-notebook rebuild' to re-index existing entries.")
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -524,6 +601,8 @@ def main() -> None:
     p_init = sub.add_parser("init", help="Initialize a notebook directory")
     p_init.add_argument("path", nargs="?", default=None,
                         help="Directory to initialize (default: current directory)")
+    p_init.add_argument("--template", nargs="?", const="", default=None,
+                        help="Schema template to use (omit value to list available templates)")
     p_init.set_defaults(func=cmd_init)
 
     # -- emit --
@@ -574,6 +653,14 @@ def main() -> None:
     # -- contexts --
     p_contexts = sub.add_parser("contexts", help="List active research contexts")
     p_contexts.set_defaults(func=cmd_contexts)
+
+    # -- template --
+    p_template = sub.add_parser("template", help="List or apply schema templates")
+    p_template.add_argument("name", nargs="?", default=None,
+                            help="Template name to apply (omit to list available)")
+    p_template.add_argument("--force", action="store_true",
+                            help="Overwrite existing schema.yaml")
+    p_template.set_defaults(func=cmd_template)
 
     args = parser.parse_args()
     args.func(args)

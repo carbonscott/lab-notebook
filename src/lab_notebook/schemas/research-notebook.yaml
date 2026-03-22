@@ -1,0 +1,21 @@
+# Research notebook — track insights, decisions, and open questions.
+# Use this schema when the notebook sits above individual repos and captures
+# the research narrative: what you tried, what you decided, and why.
+#
+# Core fields (id, ts, writer_id, context, type, content) are always present.
+# Run `lab-notebook rebuild` after changing this file.
+
+types:
+  - observation   # measurements, findings, noticed behavior
+  - decision      # choices made and their rationale
+  - dead-end      # approaches tried and failed
+  - question      # open questions needing investigation
+  - milestone     # something done, working, merged, or shipped
+
+# Field types: text, integer, real, list
+# Add fts: true to include a field in full-text search (content is always indexed).
+fields:
+  repo:       {type: text}              # source repo (e.g. research-lrn091)
+  branch:     {type: text}              # branch name
+  tags:       {type: list}              # comma-separated on CLI, stored as JSON array
+  artifacts:  {type: list}              # paths to outputs (e.g. repo:results/fig1.png)

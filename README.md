@@ -56,8 +56,12 @@ lab-notebook search "masking"
 ## Schema Configuration
 
 Each notebook has a `schema.yaml` that defines entry types and custom fields.
-`lab-notebook init` generates a default one. See `schema.example.yaml` in the
-repo for the full reference.
+`lab-notebook init` generates a default one. Run `lab-notebook template` to see
+bundled templates, or use `lab-notebook init --template <name>` to start with a
+specific one.
+
+The default template (`research-notebook`) includes basic fields. You can add
+more to your `schema.yaml`:
 
 ```yaml
 types:
@@ -72,9 +76,9 @@ fields:
   branch:     {type: text}
   tags:       {type: list}
   artifacts:  {type: list}
-  dataset:    {type: text, fts: true}
-  gpu_hours:  {type: real}
-  num_nodes:  {type: integer}
+  dataset:    {type: text, fts: true}   # additional field
+  gpu_hours:  {type: real}              # additional field
+  num_nodes:  {type: integer}           # additional field
 ```
 
 **Field types:** `text`, `integer`, `real`, `list` (list is comma-separated on
@@ -91,10 +95,12 @@ Run `lab-notebook rebuild` after changing `schema.yaml`.
 
 ## Commands
 
-### `init [path]`
+### `init [path] [--template NAME]`
 
 Initialize a notebook in an existing directory (default: cwd). Creates
-`entries/`, `schema.yaml`, `.gitignore`, and `.env`.
+`entries/`, `schema.yaml`, `.gitignore`, and `.env`. Use `--template` to pick
+a schema template (default: `research-notebook`). Pass `--template` with no
+value to list available templates.
 
 ### `emit --context X --type Y [--field ...] [--extra K=V] "content"`
 
@@ -120,6 +126,13 @@ Regenerate `index.sqlite` from `schema.yaml` and all `entries/*.jsonl` files.
 ### `contexts`
 
 List active research contexts with entry counts and date ranges.
+
+### `template [name] [--force]`
+
+List or apply bundled schema templates. With no argument, lists available
+templates. With a name, copies that template to the current notebook's
+`schema.yaml` (requires `--force` if `schema.yaml` already exists).
+Run `lab-notebook rebuild` afterward if entries exist.
 
 ## Data Layout
 
