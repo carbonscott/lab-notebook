@@ -56,8 +56,9 @@ lab-notebook search "masking"
 ## Schema Configuration
 
 Each notebook has a `schema.yaml` that defines entry types and custom fields.
-`lab-notebook init` generates a default one. See `schema.example.yaml` in the
-repo for the full reference.
+`lab-notebook init` generates a default one. Run `lab-notebook template` to see
+bundled templates, or use `lab-notebook init --template <name>` to start with a
+specific one.
 
 ```yaml
 types:
@@ -91,10 +92,12 @@ Run `lab-notebook rebuild` after changing `schema.yaml`.
 
 ## Commands
 
-### `init [path]`
+### `init [path] [--template NAME]`
 
 Initialize a notebook in an existing directory (default: cwd). Creates
-`entries/`, `schema.yaml`, `.gitignore`, and `.env`.
+`entries/`, `schema.yaml`, `.gitignore`, and `.env`. Use `--template` to pick
+a schema template (default: `research-notebook`). Pass `--template` with no
+value to list available templates.
 
 ### `emit --context X --type Y [--field ...] [--extra K=V] "content"`
 
@@ -120,6 +123,12 @@ Regenerate `index.sqlite` from `schema.yaml` and all `entries/*.jsonl` files.
 ### `contexts`
 
 List active research contexts with entry counts and date ranges.
+
+### `template [name]`
+
+List or apply bundled schema templates. With no argument, lists available
+templates. With a name, copies that template to the current notebook's
+`schema.yaml`.
 
 ## Data Layout
 

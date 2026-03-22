@@ -1,0 +1,31 @@
+# ML experiment log — track runs, crashes, and hyperparameter sweeps.
+# Use this schema when the logbook lives inside a research repo and records
+# operational data: what ran, what crashed, and how configurations evolved.
+#
+# Core fields (id, ts, writer_id, context, type, content) are always present.
+# Run `lab-notebook rebuild` after changing this file.
+
+types:
+  - run-start     # beginning of a training/eval run
+  - run-end       # run completed (record loss, metrics, gpu_hours)
+  - config-change # hyperparameter or setup change between runs
+  - crash         # run failed (record cause, gpu_hours burned)
+  - checkpoint    # notable checkpoint saved
+  - comparison    # cross-method or cross-run comparison
+
+# Field types: text, integer, real, list
+# Add fts: true to include a field in full-text search (content is always indexed).
+fields:
+  method:     {type: text, fts: true}   # ssl method (e.g. mae, dino, byol)
+  dataset:    {type: text, fts: true}   # dataset identifier
+  job_id:     {type: text}              # scheduler job id (e.g. slurm)
+  backbone:   {type: text}              # model architecture (e.g. vit-b, resnet50)
+  epochs:     {type: integer}           # number of epochs
+  batch_size: {type: integer}           # batch size
+  lr:         {type: real}              # learning rate
+  num_nodes:  {type: integer}           # compute nodes used
+  gpu_hours:  {type: real}              # GPU-hours consumed
+  loss:       {type: real}              # final or best loss value
+  metric:     {type: text}              # summary metric (e.g. val_acc=0.83)
+  tags:       {type: list}              # comma-separated on CLI
+  artifacts:  {type: list}              # paths to checkpoints, plots, configs
