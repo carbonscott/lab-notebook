@@ -292,6 +292,14 @@ class TestEmit:
         assert extra["foo"] == "bar"
         assert extra["num"] == "42"
 
+    def test_extra_rejects_schema_field_collision(self, notebook):
+        with pytest.raises(SystemExit):
+            cmd_emit(make_emit_args(extra=["repo=sneaky"], content="Should fail"))
+
+    def test_extra_rejects_core_field_collision(self, notebook):
+        with pytest.raises(SystemExit):
+            cmd_emit(make_emit_args(extra=["context=sneaky"], content="Should fail"))
+
     def test_extra_with_equals_in_value(self, notebook):
         cmd_emit(make_emit_args(extra=["expr=x=y+1"], content="Equals in value"))
 

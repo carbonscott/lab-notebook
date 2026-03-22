@@ -188,10 +188,6 @@ def index_path(notebook_dir: Path) -> Path:
     return notebook_dir / "index.sqlite"
 
 
-def schema_path(notebook_dir: Path) -> Path:
-    return notebook_dir / "schema.yaml"
-
-
 def init_db(conn: sqlite3.Connection, create_sql: str) -> None:
     conn.executescript(create_sql)
 
@@ -234,8 +230,9 @@ def upsert_entry(conn: sqlite3.Connection, entry: dict, sql: SchemaSQL) -> None:
     conn.commit()
 
 
-def ensure_db(notebook_dir: Path) -> tuple[sqlite3.Connection, dict, SchemaSQL]:
-    schema = load_schema(notebook_dir)
+def ensure_db(notebook_dir: Path, schema: dict | None = None) -> tuple[sqlite3.Connection, dict, SchemaSQL]:
+    if schema is None:
+        schema = load_schema(notebook_dir)
     sql = build_sql(schema)
     dbp = index_path(notebook_dir)
     needs_rebuild = not dbp.exists()
@@ -368,8 +365,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 def cmd_emit(args: argparse.Namespace) -> None:
     notebook_dir = get_notebook_dir()
     writer_id = get_writer_id()
-    schema = load_schema(notebook_dir)
-    sql = build_sql(schema)
+    schema = getattr(args, "_schema", None) or load_schema(notebook_dir)
 
     if args.type not in schema["types"]:
         print(f"Error: type must be one of {schema['types']}, got '{args.type}'",
@@ -399,11 +395,16 @@ def cmd_emit(args: argparse.Namespace) -> None:
         entry[name] = val
 
     # --extra key=value pairs
+    reserved_keys = set(CORE_FIELDS) | set(fields.keys()) | {"extra"}
     if args.extra:
         for item in args.extra:
             key, _, value = item.partition("=")
             if not key or not _:
                 print(f"Error: --extra must be key=value, got '{item}'", file=sys.stderr)
+                sys.exit(1)
+            if key in reserved_keys:
+                print(f"Error: --extra key '{key}' conflicts with a declared field. "
+                      f"Use --{key} instead.", file=sys.stderr)
                 sys.exit(1)
             entry[key] = value
 
@@ -418,12 +419,7 @@ def cmd_emit(args: argparse.Namespace) -> None:
 
     # Update index
     flat = flatten_entry(entry, schema)
-    dbp = index_path(notebook_dir)
-    needs_rebuild = not dbp.exists()
-    conn = sqlite3.connect(str(dbp))
-    init_db(conn, sql.create)
-    if needs_rebuild:
-        rebuild_from_jsonl(conn, notebook_dir, schema, sql)
+    conn, _, sql = ensure_db(notebook_dir, schema)
     try:
         upsert_entry(conn, flat, sql)
     finally:
@@ -532,21 +528,21 @@ def main() -> None:
     p_emit.add_argument("content", help="Entry content (notebook prose)")
 
     # Dynamically add schema-defined fields if LAB_NOTEBOOK_DIR is set
+    _parsed_schema = None
     notebook_env = os.environ.get("LAB_NOTEBOOK_DIR")
     if notebook_env:
         nb_dir = Path(notebook_env)
         sf = nb_dir / "schema.yaml"
         if sf.exists():
-            with open(sf) as f:
-                schema = yaml.safe_load(f)
-            for name, spec in schema.get("fields", {}).items():
+            _parsed_schema = load_schema(nb_dir)
+            for name, spec in _parsed_schema.get("fields", {}).items():
                 ftype = spec.get("type", "text")
                 help_text = f"Schema field ({ftype})"
                 if ftype == "list":
                     help_text = f"Schema field ({ftype}, comma-separated)"
                 p_emit.add_argument(f"--{name}", default=None, help=help_text)
 
-    p_emit.set_defaults(func=cmd_emit)
+    p_emit.set_defaults(func=cmd_emit, _schema=_parsed_schema)
 
     # -- sql --
     p_sql = sub.add_parser("sql", help="Run a SQL query against the index")
