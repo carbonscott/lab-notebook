@@ -159,6 +159,20 @@ class TestSchema:
         with pytest.raises(SystemExit):
             load_schema(tmp_path)
 
+    def test_schema_fields_null(self, notebook):
+        (notebook / "schema.yaml").write_text(
+            "types:\n  - observation\nfields:\n"
+        )
+        schema = load_schema(notebook)
+        assert schema["fields"] == {}
+
+    def test_schema_field_spec_not_dict(self, notebook):
+        (notebook / "schema.yaml").write_text(
+            "types:\n  - observation\nfields:\n  repo: text\n"
+        )
+        with pytest.raises(SystemExit):
+            load_schema(notebook)
+
     def test_build_sql_creates_custom_columns(self, custom_notebook):
         schema = load_schema(custom_notebook)
         sql = build_sql(schema)
@@ -466,6 +480,26 @@ class TestRebuild:
         assert rows[0][0] == "imagenet"
         assert rows[0][1] == 2.5
         assert rows[0][2] == "Custom rebuild"
+
+    def test_emit_after_schema_change_hints_rebuild(self, notebook, capsys):
+        cmd_emit(make_emit_args(content="Before schema change"))
+        # Add a new field to schema without rebuilding
+        (notebook / "schema.yaml").write_text(
+            "types:\n  - observation\nfields:\n"
+            "  repo: {type: text}\n"
+            "  branch: {type: text}\n"
+            "  tags: {type: list}\n"
+            "  artifacts: {type: list}\n"
+            "  new_field: {type: text}\n"
+        )
+        with pytest.raises(SystemExit):
+            cmd_emit(make_emit_args(content="After schema change"))
+        err = capsys.readouterr().err
+        assert "rebuild" in err
+        # JSONL entry was still saved
+        writer_file = entries_dir(notebook) / "test-writer.jsonl"
+        lines = writer_file.read_text().strip().split("\n")
+        assert len(lines) == 2
 
 
 # ---------------------------------------------------------------------------

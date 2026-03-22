@@ -89,11 +89,16 @@ def load_schema(notebook_dir: Path) -> dict:
     if not isinstance(schema.get("types"), list) or not schema["types"]:
         print("Error: schema.yaml must have a non-empty 'types' list.", file=sys.stderr)
         sys.exit(1)
-    fields = schema.get("fields", {})
+    fields = schema.get("fields") or {}
+    schema["fields"] = fields
     reserved = set(CORE_FIELDS) | {"extra"}
     for name, spec in fields.items():
         if name in reserved:
             print(f"Error: field '{name}' conflicts with a core field.", file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(spec, dict):
+            print(f"Error: field '{name}' must be a mapping (e.g. {{type: text}}), "
+                  f"got '{spec}'.", file=sys.stderr)
             sys.exit(1)
         ftype = spec.get("type")
         if ftype not in VALID_FIELD_TYPES:
@@ -128,7 +133,9 @@ def build_sql(schema: dict) -> SchemaSQL:
         f"CREATE TABLE IF NOT EXISTS entries (\n    "
         + ",\n    ".join(col_defs)
         + "\n);\n"
-        + f"CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5({', '.join(fts_cols)});\n"
+        + "CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5("
+        + ", ".join(f'"{c}"' for c in fts_cols)
+        + ");\n"
         + "CREATE INDEX IF NOT EXISTS idx_entries_context ON entries(context);\n"
         + "CREATE INDEX IF NOT EXISTS idx_entries_type ON entries(type);\n"
         + "CREATE INDEX IF NOT EXISTS idx_entries_ts ON entries(ts);\n"
@@ -413,6 +420,11 @@ def cmd_emit(args: argparse.Namespace) -> None:
     conn, _, sql = ensure_db(notebook_dir, schema)
     try:
         upsert_entry(conn, flat, sql)
+    except sqlite3.OperationalError:
+        print("Error: SQLite schema is out of date. Run 'lab-notebook rebuild'.",
+              file=sys.stderr)
+        print("(The JSONL entry was saved successfully.)", file=sys.stderr)
+        sys.exit(1)
     finally:
         conn.close()
 
