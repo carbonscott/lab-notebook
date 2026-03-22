@@ -17,42 +17,17 @@ import os
 import secrets
 import sqlite3
 import sys
+from collections import namedtuple
 from datetime import datetime
 from pathlib import Path
 
-ALLOWED_TYPES = ("observation", "decision", "dead-end", "question", "milestone")
+import yaml
 
-SCHEMA_SQL = """\
-CREATE TABLE IF NOT EXISTS entries (
-    id         TEXT PRIMARY KEY,
-    ts         TEXT NOT NULL,
-    writer_id  TEXT NOT NULL,
-    context    TEXT NOT NULL,
-    type       TEXT NOT NULL,
-    repo       TEXT,
-    branch     TEXT,
-    tags       TEXT,
-    artifacts  TEXT,
-    content    TEXT NOT NULL
-);
-CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(content, context);
-CREATE INDEX IF NOT EXISTS idx_entries_context ON entries(context);
-CREATE INDEX IF NOT EXISTS idx_entries_type ON entries(type);
-CREATE INDEX IF NOT EXISTS idx_entries_ts ON entries(ts);
-CREATE INDEX IF NOT EXISTS idx_entries_repo ON entries(repo);
-"""
+CORE_FIELDS = ("id", "ts", "writer_id", "context", "type", "content")
+VALID_FIELD_TYPES = ("text", "integer", "real", "list")
+TYPE_MAP = {"text": "TEXT", "integer": "INTEGER", "real": "REAL", "list": "TEXT"}
 
-UPSERT_SQL = """\
-INSERT OR REPLACE INTO entries
-    (id, ts, writer_id, context, type, repo, branch, tags, artifacts, content)
-VALUES
-    (:id, :ts, :writer_id, :context, :type, :repo, :branch, :tags, :artifacts, :content);
-"""
-
-FTS_INSERT_SQL = """\
-INSERT INTO entries_fts (rowid, content, context)
-VALUES (:rowid, :content, :context);
-"""
+SchemaSQL = namedtuple("SchemaSQL", ["create", "upsert", "fts_insert", "fts_cols"])
 
 SCHEMA_HELP = """\
 Table: entries
@@ -61,14 +36,12 @@ Table: entries
   ts         TEXT NOT NULL      -- ISO 8601 local time
   writer_id  TEXT NOT NULL      -- e.g. cong, agent-claude-01
   context    TEXT NOT NULL      -- e.g. maxie/ssl-comparison
-  type       TEXT NOT NULL      -- observation, decision, dead-end, question, milestone
-  repo       TEXT               -- e.g. research-lrn091
-  branch     TEXT               -- e.g. phase0/data-loading
-  tags       TEXT               -- JSON array, e.g. '["mae","masking"]'
-  artifacts  TEXT               -- JSON array, e.g. '["repo:path/to/file.csv"]'
+  type       TEXT NOT NULL      -- defined in schema.yaml types list
   content    TEXT NOT NULL      -- free-text notebook prose
+  extra      TEXT               -- JSON blob for undeclared --extra fields
+  (+ custom fields from schema.yaml)
 
-FTS table: entries_fts (content, context)
+FTS table: entries_fts (content + fields with fts: true)
 
 Example queries
 ---------------
@@ -103,6 +76,87 @@ WHERE writer_id = 'cong' ORDER BY ts DESC LIMIT 10;
 
 
 # ---------------------------------------------------------------------------
+# Schema loading and SQL generation
+# ---------------------------------------------------------------------------
+
+def load_schema(notebook_dir: Path) -> dict:
+    schema_file = notebook_dir / "schema.yaml"
+    if not schema_file.exists():
+        print(f"Error: {schema_file} not found. Run 'lab-notebook init' first.",
+              file=sys.stderr)
+        sys.exit(1)
+    with open(schema_file) as f:
+        schema = yaml.safe_load(f)
+    if not isinstance(schema.get("types"), list) or not schema["types"]:
+        print("Error: schema.yaml must have a non-empty 'types' list.", file=sys.stderr)
+        sys.exit(1)
+    fields = schema.get("fields", {})
+    reserved = set(CORE_FIELDS) | {"extra"}
+    for name, spec in fields.items():
+        if name in reserved:
+            print(f"Error: field '{name}' conflicts with a core field.", file=sys.stderr)
+            sys.exit(1)
+        ftype = spec.get("type")
+        if ftype not in VALID_FIELD_TYPES:
+            print(f"Error: field '{name}' has invalid type '{ftype}'. "
+                  f"Must be one of {VALID_FIELD_TYPES}.", file=sys.stderr)
+            sys.exit(1)
+    return schema
+
+
+def build_sql(schema: dict) -> SchemaSQL:
+    fields = schema.get("fields", {})
+
+    # -- CREATE TABLE --
+    col_defs = [
+        "id         TEXT PRIMARY KEY",
+        "ts         TEXT NOT NULL",
+        "writer_id  TEXT NOT NULL",
+        "context    TEXT NOT NULL",
+        "type       TEXT NOT NULL",
+        "content    TEXT NOT NULL",
+    ]
+    for name, spec in fields.items():
+        col_defs.append(f"{name} {TYPE_MAP[spec['type']]}")
+    col_defs.append("extra TEXT")
+
+    fts_cols = ["content"]
+    for name, spec in fields.items():
+        if spec.get("fts"):
+            fts_cols.append(name)
+
+    create_sql = (
+        f"CREATE TABLE IF NOT EXISTS entries (\n    "
+        + ",\n    ".join(col_defs)
+        + "\n);\n"
+        + f"CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5({', '.join(fts_cols)});\n"
+        + "CREATE INDEX IF NOT EXISTS idx_entries_context ON entries(context);\n"
+        + "CREATE INDEX IF NOT EXISTS idx_entries_type ON entries(type);\n"
+        + "CREATE INDEX IF NOT EXISTS idx_entries_ts ON entries(ts);\n"
+    )
+
+    # -- UPSERT --
+    all_cols = list(CORE_FIELDS) + list(fields.keys()) + ["extra"]
+    placeholders = ", ".join(f":{c}" for c in all_cols)
+    upsert_sql = (
+        f"INSERT OR REPLACE INTO entries\n"
+        f"    ({', '.join(all_cols)})\n"
+        f"VALUES\n"
+        f"    ({placeholders});\n"
+    )
+
+    # -- FTS INSERT --
+    fts_placeholders = ", ".join(f":{c}" for c in fts_cols)
+    fts_insert_sql = (
+        f"INSERT INTO entries_fts (rowid, {', '.join(fts_cols)})\n"
+        f"VALUES (:rowid, {fts_placeholders});\n"
+    )
+
+    return SchemaSQL(create=create_sql, upsert=upsert_sql,
+                     fts_insert=fts_insert_sql, fts_cols=fts_cols)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -134,44 +188,66 @@ def index_path(notebook_dir: Path) -> Path:
     return notebook_dir / "index.sqlite"
 
 
-def init_db(conn: sqlite3.Connection) -> None:
-    conn.executescript(SCHEMA_SQL)
+def schema_path(notebook_dir: Path) -> Path:
+    return notebook_dir / "schema.yaml"
 
 
-def flatten_entry(entry: dict) -> dict:
-    flat = dict(entry)
-    for key in ("tags", "artifacts"):
-        val = flat.get(key)
-        if val is not None and not isinstance(val, str):
-            flat[key] = json.dumps(val)
+def init_db(conn: sqlite3.Connection, create_sql: str) -> None:
+    conn.executescript(create_sql)
+
+
+def flatten_entry(entry: dict, schema: dict) -> dict:
+    fields = schema.get("fields", {})
+    list_fields = {name for name, spec in fields.items() if spec["type"] == "list"}
+    all_known = set(CORE_FIELDS) | set(fields.keys())
+
+    flat = {}
+    extras = {}
+    for key, val in entry.items():
+        if key in all_known:
+            if key in list_fields and val is not None and not isinstance(val, str):
+                flat[key] = json.dumps(val)
+            else:
+                flat[key] = val
+        else:
+            extras[key] = val
+
+    # Ensure all schema columns are present (as None if missing)
+    for col in all_known:
+        flat.setdefault(col, None)
+    flat["extra"] = json.dumps(extras) if extras else None
     return flat
 
 
-def upsert_entry(conn: sqlite3.Connection, entry: dict) -> None:
-    conn.execute(UPSERT_SQL, entry)
+def upsert_entry(conn: sqlite3.Connection, entry: dict, sql: SchemaSQL) -> None:
+    conn.execute(sql.upsert, entry)
     row = conn.execute(
         "SELECT rowid FROM entries WHERE id = :id", {"id": entry["id"]}
     ).fetchone()
     if row:
         rowid = row[0]
         conn.execute("DELETE FROM entries_fts WHERE rowid = ?", (rowid,))
-        conn.execute(FTS_INSERT_SQL, {
-            "rowid": rowid, "content": entry["content"], "context": entry["context"],
-        })
+        fts_params = {"rowid": rowid}
+        for col in sql.fts_cols:
+            fts_params[col] = entry.get(col, "")
+        conn.execute(sql.fts_insert, fts_params)
     conn.commit()
 
 
-def ensure_db(notebook_dir: Path) -> sqlite3.Connection:
+def ensure_db(notebook_dir: Path) -> tuple[sqlite3.Connection, dict, SchemaSQL]:
+    schema = load_schema(notebook_dir)
+    sql = build_sql(schema)
     dbp = index_path(notebook_dir)
     needs_rebuild = not dbp.exists()
     conn = sqlite3.connect(str(dbp))
-    init_db(conn)
+    init_db(conn, sql.create)
     if needs_rebuild:
-        rebuild_from_jsonl(conn, notebook_dir)
-    return conn
+        rebuild_from_jsonl(conn, notebook_dir, schema, sql)
+    return conn, schema, sql
 
 
-def rebuild_from_jsonl(conn: sqlite3.Connection, notebook_dir: Path) -> int:
+def rebuild_from_jsonl(conn: sqlite3.Connection, notebook_dir: Path,
+                       schema: dict, sql: SchemaSQL) -> int:
     edir = entries_dir(notebook_dir)
     if not edir.exists():
         return 0
@@ -190,15 +266,16 @@ def rebuild_from_jsonl(conn: sqlite3.Connection, notebook_dir: Path) -> int:
                     print(f"Warning: {jsonl_file.name}:{lineno}: skipping malformed line: {e}",
                           file=sys.stderr)
                     continue
-                flat = flatten_entry(entry)
-                conn.execute(UPSERT_SQL, flat)
+                flat = flatten_entry(entry, schema)
+                conn.execute(sql.upsert, flat)
                 row = conn.execute(
                     "SELECT rowid FROM entries WHERE id = ?", (flat["id"],)
                 ).fetchone()
                 if row:
-                    conn.execute(FTS_INSERT_SQL, {
-                        "rowid": row[0], "content": flat["content"], "context": flat["context"],
-                    })
+                    fts_params = {"rowid": row[0]}
+                    for col in sql.fts_cols:
+                        fts_params[col] = flat.get(col, "")
+                    conn.execute(sql.fts_insert, fts_params)
                 count += 1
     conn.commit()
     return count
@@ -229,6 +306,22 @@ def print_table(cursor: sqlite3.Cursor) -> None:
     print(f"\n({len(rows)} row{'s' if len(rows) != 1 else ''})")
 
 
+DEFAULT_SCHEMA_YAML = """\
+types:
+  - observation
+  - decision
+  - dead-end
+  - question
+  - milestone
+
+fields:
+  repo:       {type: text}
+  branch:     {type: text}
+  tags:       {type: list}
+  artifacts:  {type: list}
+"""
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -252,6 +345,10 @@ def cmd_init(args: argparse.Namespace) -> None:
         with open(gitignore, "a") as f:
             f.write("index.sqlite\n")
 
+    sf = target / "schema.yaml"
+    if not sf.exists():
+        sf.write_text(DEFAULT_SCHEMA_YAML)
+
     writer = os.environ.get("USER", "unknown")
     env_file = target / ".env"
     env_file.write_text(
@@ -260,24 +357,24 @@ def cmd_init(args: argparse.Namespace) -> None:
     )
 
     print(f"Initialized lab notebook in {target}")
-    print(f"  entries/     — per-writer JSONL files")
-    print(f"  .gitignore   — ignores index.sqlite")
-    print(f"  .env         — LAB_NOTEBOOK_DIR={target}")
-    print(f"                  LAB_NOTEBOOK_WRITER={writer}")
+    print(f"  entries/       per-writer JSONL files")
+    print(f"  schema.yaml    field definitions")
+    print(f"  .gitignore     ignores index.sqlite")
+    print(f"  .env           LAB_NOTEBOOK_DIR={target}")
+    print(f"                 LAB_NOTEBOOK_WRITER={writer}")
     print(f"\nNext: source {env_file}")
 
 
 def cmd_emit(args: argparse.Namespace) -> None:
     notebook_dir = get_notebook_dir()
     writer_id = get_writer_id()
+    schema = load_schema(notebook_dir)
+    sql = build_sql(schema)
 
-    if args.type not in ALLOWED_TYPES:
-        print(f"Error: type must be one of {ALLOWED_TYPES}, got '{args.type}'",
+    if args.type not in schema["types"]:
+        print(f"Error: type must be one of {schema['types']}, got '{args.type}'",
               file=sys.stderr)
         sys.exit(1)
-
-    tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else None
-    artifacts = [a.strip() for a in args.artifacts.split(",") if a.strip()] if args.artifacts else None
 
     entry = {
         "id": generate_id(),
@@ -285,13 +382,32 @@ def cmd_emit(args: argparse.Namespace) -> None:
         "writer_id": writer_id,
         "context": args.context,
         "type": args.type,
-        "repo": args.repo,
-        "branch": args.branch,
-        "tags": tags,
-        "artifacts": artifacts,
         "content": args.content,
     }
 
+    # Schema-defined fields
+    fields = schema.get("fields", {})
+    for name, spec in fields.items():
+        val = getattr(args, name, None)
+        if val is not None:
+            if spec["type"] == "list":
+                val = [v.strip() for v in val.split(",") if v.strip()]
+            elif spec["type"] == "integer":
+                val = int(val)
+            elif spec["type"] == "real":
+                val = float(val)
+        entry[name] = val
+
+    # --extra key=value pairs
+    if args.extra:
+        for item in args.extra:
+            key, _, value = item.partition("=")
+            if not key or not _:
+                print(f"Error: --extra must be key=value, got '{item}'", file=sys.stderr)
+                sys.exit(1)
+            entry[key] = value
+
+    # Write JSONL
     edir = entries_dir(notebook_dir)
     edir.mkdir(exist_ok=True)
     writer_file = edir / f"{writer_id}.jsonl"
@@ -300,10 +416,16 @@ def cmd_emit(args: argparse.Namespace) -> None:
         f.flush()
         os.fsync(f.fileno())
 
-    flat = flatten_entry(entry)
-    conn = ensure_db(notebook_dir)
+    # Update index
+    flat = flatten_entry(entry, schema)
+    dbp = index_path(notebook_dir)
+    needs_rebuild = not dbp.exists()
+    conn = sqlite3.connect(str(dbp))
+    init_db(conn, sql.create)
+    if needs_rebuild:
+        rebuild_from_jsonl(conn, notebook_dir, schema, sql)
     try:
-        upsert_entry(conn, flat)
+        upsert_entry(conn, flat, sql)
     finally:
         conn.close()
 
@@ -312,7 +434,7 @@ def cmd_emit(args: argparse.Namespace) -> None:
 
 def cmd_sql(args: argparse.Namespace) -> None:
     notebook_dir = get_notebook_dir()
-    conn = ensure_db(notebook_dir)
+    conn, schema, sql = ensure_db(notebook_dir)
     try:
         cursor = conn.execute(args.query)
         print_table(cursor)
@@ -325,21 +447,21 @@ def cmd_sql(args: argparse.Namespace) -> None:
 
 def cmd_search(args: argparse.Namespace) -> None:
     notebook_dir = get_notebook_dir()
-    conn = ensure_db(notebook_dir)
+    conn, schema, sql = ensure_db(notebook_dir)
     try:
-        sql = """SELECT e.ts, e.context, e.type, e.writer_id, substr(e.content, 1, 120)
+        query_sql = """SELECT e.ts, e.context, e.type, e.writer_id, substr(e.content, 1, 120)
                  FROM entries e
                  JOIN entries_fts f ON f.rowid = e.rowid
                  WHERE entries_fts MATCH :query"""
         params: dict = {"query": args.query}
         if args.context:
-            sql += " AND e.context = :context"
+            query_sql += " AND e.context = :context"
             params["context"] = args.context
         if args.type:
-            sql += " AND e.type = :type"
+            query_sql += " AND e.type = :type"
             params["type"] = args.type
-        sql += " ORDER BY e.ts DESC"
-        cursor = conn.execute(sql, params)
+        query_sql += " ORDER BY e.ts DESC"
+        cursor = conn.execute(query_sql, params)
         print_table(cursor)
     except sqlite3.OperationalError as e:
         print(f"Search error: {e}", file=sys.stderr)
@@ -354,13 +476,15 @@ def cmd_schema(args: argparse.Namespace) -> None:
 
 def cmd_rebuild(args: argparse.Namespace) -> None:
     notebook_dir = get_notebook_dir()
+    schema = load_schema(notebook_dir)
+    sql = build_sql(schema)
     dbp = index_path(notebook_dir)
     if dbp.exists():
         dbp.unlink()
     conn = sqlite3.connect(str(dbp))
-    init_db(conn)
+    init_db(conn, sql.create)
     try:
-        count = rebuild_from_jsonl(conn, notebook_dir)
+        count = rebuild_from_jsonl(conn, notebook_dir, schema, sql)
         print(f"Rebuilt index: {count} entries from {entries_dir(notebook_dir)}")
     finally:
         conn.close()
@@ -368,7 +492,7 @@ def cmd_rebuild(args: argparse.Namespace) -> None:
 
 def cmd_contexts(args: argparse.Namespace) -> None:
     notebook_dir = get_notebook_dir()
-    conn = ensure_db(notebook_dir)
+    conn, schema, sql = ensure_db(notebook_dir)
     try:
         cursor = conn.execute("""\
             SELECT context, COUNT(*) AS entries, MIN(ts) AS first, MAX(ts) AS latest
@@ -402,12 +526,26 @@ def main() -> None:
     # -- emit --
     p_emit = sub.add_parser("emit", help="Write a notebook entry")
     p_emit.add_argument("--context", required=True, help="Research context (e.g. maxie/ssl-comparison)")
-    p_emit.add_argument("--type", required=True, help=f"Entry type: {', '.join(ALLOWED_TYPES)}")
-    p_emit.add_argument("--repo", help="Repository name")
-    p_emit.add_argument("--branch", help="Branch name")
-    p_emit.add_argument("--tags", help="Comma-separated tags")
-    p_emit.add_argument("--artifacts", help="Comma-separated artifact paths")
+    p_emit.add_argument("--type", required=True, help="Entry type (defined in schema.yaml)")
+    p_emit.add_argument("--extra", action="append", metavar="KEY=VALUE",
+                        help="Extra undeclared field (repeatable)")
     p_emit.add_argument("content", help="Entry content (notebook prose)")
+
+    # Dynamically add schema-defined fields if LAB_NOTEBOOK_DIR is set
+    notebook_env = os.environ.get("LAB_NOTEBOOK_DIR")
+    if notebook_env:
+        nb_dir = Path(notebook_env)
+        sf = nb_dir / "schema.yaml"
+        if sf.exists():
+            with open(sf) as f:
+                schema = yaml.safe_load(f)
+            for name, spec in schema.get("fields", {}).items():
+                ftype = spec.get("type", "text")
+                help_text = f"Schema field ({ftype})"
+                if ftype == "list":
+                    help_text = f"Schema field ({ftype}, comma-separated)"
+                p_emit.add_argument(f"--{name}", default=None, help=help_text)
+
     p_emit.set_defaults(func=cmd_emit)
 
     # -- sql --
