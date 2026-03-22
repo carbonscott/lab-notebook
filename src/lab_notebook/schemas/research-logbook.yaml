@@ -1,0 +1,22 @@
+# Research logbook — track experiments, baselines, and distillations.
+# Use this schema alongside research-notebook for autonomous research loops.
+# The logbook records operational data: what ran, what improved, what crashed.
+# The notebook (research-notebook template) records narrative insights.
+#
+# Core fields (id, ts, writer_id, context, type, content) are always present.
+# Run `lab-notebook rebuild` after changing this file.
+
+types:
+  - experiment    # one atomic experiment (modify, run, evaluate)
+  - baseline      # reference run with unmodified code/config
+  - distillation  # outer loop compression of accumulated evidence
+
+# Field types: text, integer, real, list
+# Add fts: true to include a field in full-text search (content is always indexed).
+fields:
+  commit_hash:  {type: text}              # git short hash for this experiment
+  change_type:  {type: text, fts: true}   # category: architecture, hyperparameter, optimizer, etc.
+  status:       {type: text}              # keep, discard, crash, or keep-deferred (bulk mode)
+  metrics:      {type: text}              # JSON blob, e.g. {"val_bpb": 0.99, "memory_gb": 44}
+  batch_id:     {type: integer}           # shared across experiments in a bulk batch; NULL for sequential
+  strategy:     {type: text, fts: true}   # distillation entries: what to try next and why
