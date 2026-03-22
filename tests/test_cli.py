@@ -15,10 +15,14 @@ from lab_notebook.cli import (
     cmd_init,
     cmd_rebuild,
     cmd_search,
+    cmd_schema,
     cmd_sql,
     ensure_db,
     entries_dir,
     index_path,
+    load_schema,
+    build_sql,
+    flatten_entry,
 )
 
 
@@ -34,6 +38,31 @@ def notebook(tmp_path, monkeypatch):
     return target
 
 
+@pytest.fixture()
+def custom_notebook(tmp_path, monkeypatch):
+    """Initialize a notebook with a custom schema."""
+    target = tmp_path / "nb"
+    target.mkdir()
+    args = argparse.Namespace(path=str(target))
+    cmd_init(args)
+    # Overwrite schema.yaml with custom fields
+    (target / "schema.yaml").write_text(
+        "types:\n"
+        "  - observation\n"
+        "  - result\n"
+        "  - dead-end\n"
+        "\n"
+        "fields:\n"
+        "  dataset:   {type: text, fts: true}\n"
+        "  gpu_hours: {type: real}\n"
+        "  num_nodes: {type: integer}\n"
+        "  tags:      {type: list}\n"
+    )
+    monkeypatch.setenv("LAB_NOTEBOOK_DIR", str(target))
+    monkeypatch.setenv("LAB_NOTEBOOK_WRITER", "test-writer")
+    return target
+
+
 def make_emit_args(**kwargs):
     defaults = {
         "context": "test/context",
@@ -42,6 +71,22 @@ def make_emit_args(**kwargs):
         "branch": None,
         "tags": None,
         "artifacts": None,
+        "extra": None,
+        "content": "Test content",
+    }
+    defaults.update(kwargs)
+    return argparse.Namespace(**defaults)
+
+
+def make_custom_emit_args(**kwargs):
+    defaults = {
+        "context": "test/context",
+        "type": "observation",
+        "dataset": None,
+        "gpu_hours": None,
+        "num_nodes": None,
+        "tags": None,
+        "extra": None,
         "content": "Test content",
     }
     defaults.update(kwargs)
@@ -68,6 +113,21 @@ class TestInit:
         assert f"LAB_NOTEBOOK_DIR={target}" in env_text
         assert "LAB_NOTEBOOK_WRITER=" in env_text
 
+    def test_init_creates_schema_yaml(self, tmp_path):
+        target = tmp_path / "nb"
+        target.mkdir()
+        args = argparse.Namespace(path=str(target))
+        cmd_init(args)
+
+        sf = target / "schema.yaml"
+        assert sf.exists()
+        import yaml
+        schema = yaml.safe_load(sf.read_text())
+        assert "types" in schema
+        assert "observation" in schema["types"]
+        assert "fields" in schema
+        assert "repo" in schema["fields"]
+
     def test_init_cwd(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         args = argparse.Namespace(path=None)
@@ -75,11 +135,74 @@ class TestInit:
 
         assert (tmp_path / "entries").is_dir()
         assert (tmp_path / ".env").exists()
+        assert (tmp_path / "schema.yaml").exists()
 
     def test_init_nonexistent_dir(self, tmp_path):
         args = argparse.Namespace(path=str(tmp_path / "does-not-exist"))
         with pytest.raises(SystemExit):
             cmd_init(args)
+
+
+# ---------------------------------------------------------------------------
+# schema loading
+# ---------------------------------------------------------------------------
+
+
+class TestSchema:
+    def test_load_schema_from_yaml(self, notebook):
+        schema = load_schema(notebook)
+        assert "observation" in schema["types"]
+        assert "repo" in schema["fields"]
+        assert schema["fields"]["tags"]["type"] == "list"
+
+    def test_load_schema_missing_file(self, tmp_path):
+        with pytest.raises(SystemExit):
+            load_schema(tmp_path)
+
+    def test_schema_fields_null(self, notebook):
+        (notebook / "schema.yaml").write_text(
+            "types:\n  - observation\nfields:\n"
+        )
+        schema = load_schema(notebook)
+        assert schema["fields"] == {}
+
+    def test_schema_field_spec_not_dict(self, notebook):
+        (notebook / "schema.yaml").write_text(
+            "types:\n  - observation\nfields:\n  repo: text\n"
+        )
+        with pytest.raises(SystemExit):
+            load_schema(notebook)
+
+    def test_build_sql_creates_custom_columns(self, custom_notebook):
+        schema = load_schema(custom_notebook)
+        sql = build_sql(schema)
+        assert '"dataset" TEXT' in sql.create
+        assert '"gpu_hours" REAL' in sql.create
+        assert '"num_nodes" INTEGER' in sql.create
+        assert "extra TEXT" in sql.create
+
+    def test_build_sql_fts_includes_custom_field(self, custom_notebook):
+        schema = load_schema(custom_notebook)
+        sql = build_sql(schema)
+        assert "content" in sql.fts_cols
+        assert "dataset" in sql.fts_cols
+        assert "gpu_hours" not in sql.fts_cols
+
+    def test_schema_output_reflects_custom_fields(self, custom_notebook, capsys):
+        cmd_schema(argparse.Namespace())
+        out = capsys.readouterr().out
+        assert "dataset" in out
+        assert "gpu_hours" in out
+        assert "(fts)" in out
+        assert "observation" in out
+
+    def test_custom_types_validation(self, custom_notebook):
+        cmd_emit(make_custom_emit_args(type="result", content="A result"))
+        # Should work: 'result' is in custom types
+
+        with pytest.raises(SystemExit):
+            cmd_emit(make_custom_emit_args(type="milestone", content="Not allowed"))
+        # 'milestone' is not in the custom schema's types list
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +224,6 @@ class TestEmit:
         assert "id" in line
         assert "ts" in line
 
-        # Verify index has the entry
         conn = sqlite3.connect(str(index_path(notebook)))
         rows = conn.execute("SELECT content FROM entries").fetchall()
         conn.close()
@@ -139,6 +261,78 @@ class TestEmit:
         lines = writer_file.read_text().strip().split("\n")
         assert len(lines) == 2
 
+    def test_custom_text_field(self, custom_notebook):
+        cmd_emit(make_custom_emit_args(dataset="cifar10", content="Testing dataset"))
+
+        writer_file = entries_dir(custom_notebook) / "test-writer.jsonl"
+        line = json.loads(writer_file.read_text().strip())
+        assert line["dataset"] == "cifar10"
+
+        conn = sqlite3.connect(str(index_path(custom_notebook)))
+        rows = conn.execute("SELECT dataset FROM entries").fetchall()
+        conn.close()
+        assert rows[0][0] == "cifar10"
+
+    def test_custom_real_field(self, custom_notebook):
+        cmd_emit(make_custom_emit_args(gpu_hours="4.5", content="Testing real"))
+
+        writer_file = entries_dir(custom_notebook) / "test-writer.jsonl"
+        line = json.loads(writer_file.read_text().strip())
+        assert line["gpu_hours"] == 4.5
+
+        conn = sqlite3.connect(str(index_path(custom_notebook)))
+        rows = conn.execute("SELECT gpu_hours FROM entries").fetchall()
+        conn.close()
+        assert rows[0][0] == 4.5
+
+    def test_custom_integer_field(self, custom_notebook):
+        cmd_emit(make_custom_emit_args(num_nodes="32", content="Testing integer"))
+
+        writer_file = entries_dir(custom_notebook) / "test-writer.jsonl"
+        line = json.loads(writer_file.read_text().strip())
+        assert line["num_nodes"] == 32
+
+    def test_custom_list_field(self, custom_notebook):
+        cmd_emit(make_custom_emit_args(tags="mae,vit,scaling", content="Testing list"))
+
+        writer_file = entries_dir(custom_notebook) / "test-writer.jsonl"
+        line = json.loads(writer_file.read_text().strip())
+        assert line["tags"] == ["mae", "vit", "scaling"]
+
+    def test_extra_escape_hatch(self, notebook):
+        cmd_emit(make_emit_args(extra=["foo=bar", "num=42"], content="With extras"))
+
+        writer_file = entries_dir(notebook) / "test-writer.jsonl"
+        line = json.loads(writer_file.read_text().strip())
+        assert line["foo"] == "bar"
+        assert line["num"] == "42"
+
+        conn = sqlite3.connect(str(index_path(notebook)))
+        rows = conn.execute("SELECT extra FROM entries").fetchall()
+        conn.close()
+        extra = json.loads(rows[0][0])
+        assert extra["foo"] == "bar"
+        assert extra["num"] == "42"
+
+    def test_extra_rejects_schema_field_collision(self, notebook):
+        with pytest.raises(SystemExit):
+            cmd_emit(make_emit_args(extra=["repo=sneaky"], content="Should fail"))
+
+    def test_extra_rejects_core_field_collision(self, notebook):
+        with pytest.raises(SystemExit):
+            cmd_emit(make_emit_args(extra=["context=sneaky"], content="Should fail"))
+
+    def test_extra_rejects_custom_schema_field_collision(self, custom_notebook):
+        with pytest.raises(SystemExit):
+            cmd_emit(make_custom_emit_args(extra=["dataset=sneaky"], content="Should fail"))
+
+    def test_extra_with_equals_in_value(self, notebook):
+        cmd_emit(make_emit_args(extra=["expr=x=y+1"], content="Equals in value"))
+
+        writer_file = entries_dir(notebook) / "test-writer.jsonl"
+        line = json.loads(writer_file.read_text().strip())
+        assert line["expr"] == "x=y+1"
+
 
 # ---------------------------------------------------------------------------
 # sql
@@ -163,6 +357,16 @@ class TestSql:
     def test_invalid_sql(self, notebook):
         with pytest.raises(SystemExit):
             cmd_sql(argparse.Namespace(query="NOT VALID SQL"))
+
+    def test_query_custom_field(self, custom_notebook, capsys):
+        cmd_emit(make_custom_emit_args(dataset="imagenet", content="Custom query test"))
+        cmd_sql(argparse.Namespace(
+            query="SELECT dataset, content FROM entries WHERE dataset = 'imagenet'"
+        ))
+
+        out = capsys.readouterr().out
+        assert "imagenet" in out
+        assert "1 row" in out
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +402,15 @@ class TestSearch:
         assert "decided" in out
         assert "1 row" in out
 
+    def test_fts_on_custom_field(self, custom_notebook, capsys):
+        cmd_emit(make_custom_emit_args(dataset="imagenet", content="Training run"))
+        cmd_emit(make_custom_emit_args(dataset="cifar10", content="Another run"))
+
+        cmd_search(argparse.Namespace(query="imagenet", context=None, type=None))
+        out = capsys.readouterr().out
+        assert "Training run" in out
+        assert "1 row" in out
+
 
 # ---------------------------------------------------------------------------
 # contexts
@@ -226,18 +439,15 @@ class TestRebuild:
     def test_rebuild_from_jsonl(self, notebook, capsys):
         cmd_emit(make_emit_args(content="Persistent entry"))
 
-        # Delete index
         idx = index_path(notebook)
         idx.unlink()
         assert not idx.exists()
 
-        # Rebuild
         cmd_rebuild(argparse.Namespace())
         out = capsys.readouterr().out
         assert "1 entries" in out
         assert idx.exists()
 
-        # Verify data survived
         conn = sqlite3.connect(str(idx))
         rows = conn.execute("SELECT content FROM entries").fetchall()
         conn.close()
@@ -246,13 +456,50 @@ class TestRebuild:
     def test_auto_rebuild_on_sql(self, notebook, capsys):
         cmd_emit(make_emit_args(content="Auto rebuild test"))
 
-        # Delete index
         index_path(notebook).unlink()
 
-        # sql triggers auto-rebuild
         cmd_sql(argparse.Namespace(query="SELECT content FROM entries"))
         out = capsys.readouterr().out
         assert "Auto rebuild test" in out
+
+    def test_rebuild_with_custom_schema(self, custom_notebook, capsys):
+        cmd_emit(make_custom_emit_args(
+            dataset="imagenet", gpu_hours="2.5", content="Custom rebuild"
+        ))
+
+        idx = index_path(custom_notebook)
+        idx.unlink()
+
+        cmd_rebuild(argparse.Namespace())
+        out = capsys.readouterr().out
+        assert "1 entries" in out
+
+        conn = sqlite3.connect(str(idx))
+        rows = conn.execute("SELECT dataset, gpu_hours, content FROM entries").fetchall()
+        conn.close()
+        assert rows[0][0] == "imagenet"
+        assert rows[0][1] == 2.5
+        assert rows[0][2] == "Custom rebuild"
+
+    def test_emit_after_schema_change_hints_rebuild(self, notebook, capsys):
+        cmd_emit(make_emit_args(content="Before schema change"))
+        # Add a new field to schema without rebuilding
+        (notebook / "schema.yaml").write_text(
+            "types:\n  - observation\nfields:\n"
+            "  repo: {type: text}\n"
+            "  branch: {type: text}\n"
+            "  tags: {type: list}\n"
+            "  artifacts: {type: list}\n"
+            "  new_field: {type: text}\n"
+        )
+        with pytest.raises(SystemExit):
+            cmd_emit(make_emit_args(content="After schema change"))
+        err = capsys.readouterr().err
+        assert "rebuild" in err
+        # JSONL entry was still saved
+        writer_file = entries_dir(notebook) / "test-writer.jsonl"
+        lines = writer_file.read_text().strip().split("\n")
+        assert len(lines) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +518,6 @@ class TestMultipleWriters:
         assert (edir / "test-writer.jsonl").exists()
         assert (edir / "writer-b.jsonl").exists()
 
-        # Both in index
         conn = sqlite3.connect(str(index_path(notebook)))
         rows = conn.execute("SELECT writer_id, content FROM entries ORDER BY writer_id").fetchall()
         conn.close()
@@ -284,7 +530,6 @@ class TestMultipleWriters:
         monkeypatch.setenv("LAB_NOTEBOOK_WRITER", "writer-b")
         cmd_emit(make_emit_args(content="Writer B entry"))
 
-        # Delete and rebuild
         index_path(notebook).unlink()
         cmd_rebuild(argparse.Namespace())
 

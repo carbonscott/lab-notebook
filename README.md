@@ -2,7 +2,8 @@
 
 Append-only lab notebook for tracking research across multiple repos.
 JSONL files are the git-tracked source of truth. SQLite + FTS5 is a
-disposable query index rebuilt on demand.
+disposable query index rebuilt on demand. Schema is configurable via
+`schema.yaml`.
 
 ## Installation
 
@@ -33,12 +34,16 @@ lab-notebook init /path/to/my-notebook
 # 2. Source the .env (sets LAB_NOTEBOOK_DIR and LAB_NOTEBOOK_WRITER)
 source /path/to/my-notebook/.env
 
-# 3. Write an entry
+# 3. Write an entry (CLI args come from schema.yaml)
 lab-notebook emit --context maxie/ssl-comparison --type observation \
+    --tags mae,masking \
     "MAE with 75% masking spends most capacity on background."
 
 # 4. Query
 lab-notebook sql "SELECT ts, type, substr(content,1,80) FROM entries ORDER BY ts DESC LIMIT 10"
+
+# 5. Full-text search
+lab-notebook search "masking"
 ```
 
 ## Environment Variables
@@ -48,18 +53,53 @@ lab-notebook sql "SELECT ts, type, substr(content,1,80) FROM entries ORDER BY ts
 | `LAB_NOTEBOOK_DIR` | Yes | — | Path to notebook data directory |
 | `LAB_NOTEBOOK_WRITER` | No | `$USER` | Writer ID for entries |
 
+## Schema Configuration
+
+Each notebook has a `schema.yaml` that defines entry types and custom fields.
+`lab-notebook init` generates a default one. See `schema.example.yaml` in the
+repo for the full reference.
+
+```yaml
+types:
+  - observation
+  - decision
+  - dead-end
+  - question
+  - milestone
+
+fields:
+  repo:       {type: text}
+  branch:     {type: text}
+  tags:       {type: list}
+  artifacts:  {type: list}
+  dataset:    {type: text, fts: true}
+  gpu_hours:  {type: real}
+  num_nodes:  {type: integer}
+```
+
+**Field types:** `text`, `integer`, `real`, `list` (list is comma-separated on
+the CLI, stored as a JSON array in JSONL).
+
+**Full-text search:** Add `fts: true` to include a field in the FTS5 index.
+`content` is always indexed.
+
+**`--extra`:** For one-off fields not in the schema, use `--extra key=value`
+(repeatable). These are stored in the JSONL and in a JSON blob column in SQLite.
+Note: extra values are always stored as strings — use schema fields for typed data.
+
+Run `lab-notebook rebuild` after changing `schema.yaml`.
+
 ## Commands
 
 ### `init [path]`
 
 Initialize a notebook in an existing directory (default: cwd). Creates
-`entries/`, `.gitignore`, and `.env`.
+`entries/`, `schema.yaml`, `.gitignore`, and `.env`.
 
-### `emit --context X --type Y [options] "content"`
+### `emit --context X --type Y [--field ...] [--extra K=V] "content"`
 
 Write a notebook entry. Required: `--context`, `--type`, content.
-
-Options: `--repo`, `--branch`, `--tags` (comma-separated), `--artifacts` (comma-separated).
+Custom field flags (e.g. `--repo`, `--tags`) are generated from `schema.yaml`.
 
 ### `sql "query"`
 
@@ -75,21 +115,11 @@ Print table structure and example queries.
 
 ### `rebuild`
 
-Regenerate `index.sqlite` from all `entries/*.jsonl` files.
+Regenerate `index.sqlite` from `schema.yaml` and all `entries/*.jsonl` files.
 
 ### `contexts`
 
 List active research contexts with entry counts and date ranges.
-
-## Entry Types
-
-| Type | Use for |
-|------|---------|
-| `observation` | "I saw/measured/noticed this" |
-| `decision` | "We chose X because Y" |
-| `dead-end` | "X failed because Y, don't retry" |
-| `question` | "We don't know X yet" |
-| `milestone` | "X is done/working/merged" |
 
 ## Data Layout
 
@@ -99,6 +129,7 @@ my-notebook/
 │   ├── cong.jsonl
 │   ├── intern-alice.jsonl
 │   └── agent-claude-01.jsonl
+├── schema.yaml       # field definitions and entry types
 ├── index.sqlite      # gitignored, rebuilt on demand
 ├── .gitignore
 └── .env

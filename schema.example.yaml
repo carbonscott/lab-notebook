@@ -1,0 +1,22 @@
+# Lab notebook schema configuration.
+# Copy this file as schema.yaml into your notebook directory.
+# Core fields (id, ts, writer_id, context, type, content) are always present.
+# Run `lab-notebook rebuild` after changing this file.
+
+types:
+  - observation
+  - decision
+  - dead-end
+  - question
+  - milestone
+
+# Field types: text, integer, real, list
+# Add fts: true to include a field in full-text search (content is always indexed).
+fields:
+  repo:       {type: text}
+  branch:     {type: text}
+  tags:       {type: list}
+  artifacts:  {type: list}
+  # dataset:   {type: text, fts: true}
+  # gpu_hours: {type: real}
+  # num_nodes: {type: integer}

@@ -3,6 +3,7 @@ name = "lab-notebook"
 version = "0.1.0"
 description = "Append-only lab notebook with SQL query support"
 requires-python = ">=3.11"
+dependencies = ["pyyaml"]
 
 [project.optional-dependencies]
 test = ["pytest"]
