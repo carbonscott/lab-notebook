@@ -29,20 +29,7 @@ TYPE_MAP = {"text": "TEXT", "integer": "INTEGER", "real": "REAL", "list": "TEXT"
 
 SchemaSQL = namedtuple("SchemaSQL", ["create", "upsert", "fts_insert", "fts_cols"])
 
-SCHEMA_HELP = """\
-Table: entries
---------------
-  id         TEXT PRIMARY KEY   -- e.g. 20260321T143022-a7f2
-  ts         TEXT NOT NULL      -- ISO 8601 local time
-  writer_id  TEXT NOT NULL      -- e.g. cong, agent-claude-01
-  context    TEXT NOT NULL      -- e.g. maxie/ssl-comparison
-  type       TEXT NOT NULL      -- defined in schema.yaml types list
-  content    TEXT NOT NULL      -- free-text notebook prose
-  extra      TEXT               -- JSON blob for undeclared --extra fields
-  (+ custom fields from schema.yaml)
-
-FTS table: entries_fts (content + fields with fts: true)
-
+EXAMPLE_QUERIES = """\
 Example queries
 ---------------
 -- Recent entries
@@ -50,29 +37,41 @@ SELECT ts, type, substr(content, 1, 80) FROM entries ORDER BY ts DESC LIMIT 10;
 
 -- All decisions in a context
 SELECT ts, substr(content, 1, 80) FROM entries
-WHERE context = 'maxie/ssl-comparison' AND type = 'decision' ORDER BY ts;
-
--- Dead ends across all contexts
-SELECT context, ts, substr(content, 1, 80) FROM entries
-WHERE type = 'dead-end' ORDER BY ts DESC;
+WHERE context = 'my/context' AND type = 'decision' ORDER BY ts;
 
 -- Full-text search
 SELECT e.ts, e.context, e.type, substr(e.content, 1, 80) FROM entries e
 JOIN entries_fts f ON f.rowid = e.rowid
-WHERE entries_fts MATCH 'broker manifest';
-
--- Filter by tag
-SELECT ts, context, type FROM entries
-WHERE EXISTS (SELECT 1 FROM json_each(tags) WHERE value = 'scaling');
+WHERE entries_fts MATCH 'search term';
 
 -- Entries per context
 SELECT context, COUNT(*) AS n, MIN(ts) AS first, MAX(ts) AS latest
 FROM entries GROUP BY context ORDER BY latest DESC;
-
--- Entries by a specific writer
-SELECT ts, context, type, substr(content, 1, 80) FROM entries
-WHERE writer_id = 'cong' ORDER BY ts DESC LIMIT 10;
 """
+
+
+def format_schema_help(schema: dict) -> str:
+    fields = schema.get("fields", {})
+    lines = ["Table: entries", "--------------"]
+    core = [
+        ("id", "TEXT PRIMARY KEY", "e.g. 20260321T143022-a7f2"),
+        ("ts", "TEXT NOT NULL", "ISO 8601 local time"),
+        ("writer_id", "TEXT NOT NULL", "e.g. cong, agent-claude-01"),
+        ("context", "TEXT NOT NULL", "e.g. maxie/ssl-comparison"),
+        ("type", "TEXT NOT NULL", "one of: " + ", ".join(schema["types"])),
+        ("content", "TEXT NOT NULL", "free-text notebook prose"),
+    ]
+    for name, sqltype, desc in core:
+        lines.append(f"  {name:<12} {sqltype:<18} -- {desc}")
+    for name, spec in fields.items():
+        sqltype = TYPE_MAP[spec["type"]]
+        fts_note = " (fts)" if spec.get("fts") else ""
+        lines.append(f"  {name:<12} {sqltype:<18} -- schema field{fts_note}")
+    lines.append(f"  {'extra':<12} {'TEXT':<18} -- JSON blob for --extra fields")
+    lines.append("")
+    fts_cols = ["content"] + [n for n, s in fields.items() if s.get("fts")]
+    lines.append(f"FTS table: entries_fts ({', '.join(fts_cols)})")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +116,7 @@ def build_sql(schema: dict) -> SchemaSQL:
         "content    TEXT NOT NULL",
     ]
     for name, spec in fields.items():
-        col_defs.append(f"{name} {TYPE_MAP[spec['type']]}")
+        col_defs.append(f'"{name}" {TYPE_MAP[spec["type"]]}')
     col_defs.append("extra TEXT")
 
     fts_cols = ["content"]
@@ -137,18 +136,20 @@ def build_sql(schema: dict) -> SchemaSQL:
 
     # -- UPSERT --
     all_cols = list(CORE_FIELDS) + list(fields.keys()) + ["extra"]
+    quoted_cols = ", ".join(f'"{c}"' for c in all_cols)
     placeholders = ", ".join(f":{c}" for c in all_cols)
     upsert_sql = (
         f"INSERT OR REPLACE INTO entries\n"
-        f"    ({', '.join(all_cols)})\n"
+        f"    ({quoted_cols})\n"
         f"VALUES\n"
         f"    ({placeholders});\n"
     )
 
     # -- FTS INSERT --
+    quoted_fts = ", ".join(f'"{c}"' for c in fts_cols)
     fts_placeholders = ", ".join(f":{c}" for c in fts_cols)
     fts_insert_sql = (
-        f"INSERT INTO entries_fts (rowid, {', '.join(fts_cols)})\n"
+        f"INSERT INTO entries_fts (rowid, {quoted_fts})\n"
         f"VALUES (:rowid, {fts_placeholders});\n"
     )
 
@@ -188,10 +189,6 @@ def index_path(notebook_dir: Path) -> Path:
     return notebook_dir / "index.sqlite"
 
 
-def init_db(conn: sqlite3.Connection, create_sql: str) -> None:
-    conn.executescript(create_sql)
-
-
 def flatten_entry(entry: dict, schema: dict) -> dict:
     fields = schema.get("fields", {})
     list_fields = {name for name, spec in fields.items() if spec["type"] == "list"}
@@ -215,7 +212,8 @@ def flatten_entry(entry: dict, schema: dict) -> dict:
     return flat
 
 
-def upsert_entry(conn: sqlite3.Connection, entry: dict, sql: SchemaSQL) -> None:
+def upsert_entry(conn: sqlite3.Connection, entry: dict, sql: SchemaSQL,
+                  commit: bool = True) -> None:
     conn.execute(sql.upsert, entry)
     row = conn.execute(
         "SELECT rowid FROM entries WHERE id = :id", {"id": entry["id"]}
@@ -227,7 +225,8 @@ def upsert_entry(conn: sqlite3.Connection, entry: dict, sql: SchemaSQL) -> None:
         for col in sql.fts_cols:
             fts_params[col] = entry.get(col, "")
         conn.execute(sql.fts_insert, fts_params)
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def ensure_db(notebook_dir: Path, schema: dict | None = None) -> tuple[sqlite3.Connection, dict, SchemaSQL]:
@@ -237,7 +236,7 @@ def ensure_db(notebook_dir: Path, schema: dict | None = None) -> tuple[sqlite3.C
     dbp = index_path(notebook_dir)
     needs_rebuild = not dbp.exists()
     conn = sqlite3.connect(str(dbp))
-    init_db(conn, sql.create)
+    conn.executescript(sql.create)
     if needs_rebuild:
         rebuild_from_jsonl(conn, notebook_dir, schema, sql)
     return conn, schema, sql
@@ -264,15 +263,7 @@ def rebuild_from_jsonl(conn: sqlite3.Connection, notebook_dir: Path,
                           file=sys.stderr)
                     continue
                 flat = flatten_entry(entry, schema)
-                conn.execute(sql.upsert, flat)
-                row = conn.execute(
-                    "SELECT rowid FROM entries WHERE id = ?", (flat["id"],)
-                ).fetchone()
-                if row:
-                    fts_params = {"rowid": row[0]}
-                    for col in sql.fts_cols:
-                        fts_params[col] = flat.get(col, "")
-                    conn.execute(sql.fts_insert, fts_params)
+                upsert_entry(conn, flat, sql, commit=False)
                 count += 1
     conn.commit()
     return count
@@ -467,7 +458,11 @@ def cmd_search(args: argparse.Namespace) -> None:
 
 
 def cmd_schema(args: argparse.Namespace) -> None:
-    print(SCHEMA_HELP)
+    notebook_dir = get_notebook_dir()
+    schema = load_schema(notebook_dir)
+    print(format_schema_help(schema))
+    print()
+    print(EXAMPLE_QUERIES)
 
 
 def cmd_rebuild(args: argparse.Namespace) -> None:
@@ -478,7 +473,7 @@ def cmd_rebuild(args: argparse.Namespace) -> None:
     if dbp.exists():
         dbp.unlink()
     conn = sqlite3.connect(str(dbp))
-    init_db(conn, sql.create)
+    conn.executescript(sql.create)
     try:
         count = rebuild_from_jsonl(conn, notebook_dir, schema, sql)
         print(f"Rebuilt index: {count} entries from {entries_dir(notebook_dir)}")

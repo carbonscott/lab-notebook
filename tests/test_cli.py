@@ -15,6 +15,7 @@ from lab_notebook.cli import (
     cmd_init,
     cmd_rebuild,
     cmd_search,
+    cmd_schema,
     cmd_sql,
     ensure_db,
     entries_dir,
@@ -22,7 +23,6 @@ from lab_notebook.cli import (
     load_schema,
     build_sql,
     flatten_entry,
-    DEFAULT_SCHEMA_YAML,
 )
 
 
@@ -162,9 +162,9 @@ class TestSchema:
     def test_build_sql_creates_custom_columns(self, custom_notebook):
         schema = load_schema(custom_notebook)
         sql = build_sql(schema)
-        assert "dataset TEXT" in sql.create
-        assert "gpu_hours REAL" in sql.create
-        assert "num_nodes INTEGER" in sql.create
+        assert '"dataset" TEXT' in sql.create
+        assert '"gpu_hours" REAL' in sql.create
+        assert '"num_nodes" INTEGER' in sql.create
         assert "extra TEXT" in sql.create
 
     def test_build_sql_fts_includes_custom_field(self, custom_notebook):
@@ -173,6 +173,14 @@ class TestSchema:
         assert "content" in sql.fts_cols
         assert "dataset" in sql.fts_cols
         assert "gpu_hours" not in sql.fts_cols
+
+    def test_schema_output_reflects_custom_fields(self, custom_notebook, capsys):
+        cmd_schema(argparse.Namespace())
+        out = capsys.readouterr().out
+        assert "dataset" in out
+        assert "gpu_hours" in out
+        assert "(fts)" in out
+        assert "observation" in out
 
     def test_custom_types_validation(self, custom_notebook):
         cmd_emit(make_custom_emit_args(type="result", content="A result"))
@@ -299,6 +307,10 @@ class TestEmit:
     def test_extra_rejects_core_field_collision(self, notebook):
         with pytest.raises(SystemExit):
             cmd_emit(make_emit_args(extra=["context=sneaky"], content="Should fail"))
+
+    def test_extra_rejects_custom_schema_field_collision(self, custom_notebook):
+        with pytest.raises(SystemExit):
+            cmd_emit(make_custom_emit_args(extra=["dataset=sneaky"], content="Should fail"))
 
     def test_extra_with_equals_in_value(self, notebook):
         cmd_emit(make_emit_args(extra=["expr=x=y+1"], content="Equals in value"))

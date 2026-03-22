@@ -85,6 +85,7 @@ the CLI, stored as a JSON array in JSONL).
 
 **`--extra`:** For one-off fields not in the schema, use `--extra key=value`
 (repeatable). These are stored in the JSONL and in a JSON blob column in SQLite.
+Note: extra values are always stored as strings — use schema fields for typed data.
 
 Run `lab-notebook rebuild` after changing `schema.yaml`.
 
