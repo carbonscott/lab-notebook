@@ -18,6 +18,7 @@ import os
 import secrets
 import sqlite3
 import sys
+import tempfile
 from collections import namedtuple
 from datetime import datetime
 from importlib.resources import files
@@ -242,16 +243,46 @@ def upsert_entry(conn: sqlite3.Connection, entry: dict, sql: SchemaSQL,
         conn.commit()
 
 
+def _index_is_stale(notebook_dir: Path, dbp: Path) -> bool:
+    """True if any JSONL file or schema.yaml is newer than the index."""
+    idx_mtime = dbp.stat().st_mtime
+    schema_file = notebook_dir / "schema.yaml"
+    if schema_file.exists() and schema_file.stat().st_mtime >= idx_mtime:
+        return True
+    edir = entries_dir(notebook_dir)
+    if edir.exists():
+        for f in edir.glob("*.jsonl"):
+            if f.stat().st_mtime >= idx_mtime:
+                return True
+    return False
+
+
+def _atomic_rebuild(notebook_dir: Path, dbp: Path,
+                     schema: dict, sql: SchemaSQL) -> int:
+    """Rebuild the index into a temp file, then atomically rename into place."""
+    fd, tmp = tempfile.mkstemp(dir=str(notebook_dir), suffix='.sqlite')
+    os.close(fd)
+    try:
+        conn = sqlite3.connect(tmp)
+        conn.executescript(sql.create)
+        count = rebuild_from_jsonl(conn, notebook_dir, schema, sql)
+        conn.close()
+        os.rename(tmp, str(dbp))
+        return count
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
 def ensure_db(notebook_dir: Path, schema: dict | None = None) -> tuple[sqlite3.Connection, dict, SchemaSQL]:
     if schema is None:
         schema = load_schema(notebook_dir)
     sql = build_sql(schema)
     dbp = index_path(notebook_dir)
-    needs_rebuild = not dbp.exists()
+    if not dbp.exists() or _index_is_stale(notebook_dir, dbp):
+        count = _atomic_rebuild(notebook_dir, dbp, schema, sql)
+        print(f"Index rebuilt: {count} entries", file=sys.stderr)
     conn = sqlite3.connect(str(dbp))
-    conn.executescript(sql.create)
-    if needs_rebuild:
-        rebuild_from_jsonl(conn, notebook_dir, schema, sql)
     return conn, schema, sql
 
 
@@ -472,19 +503,6 @@ def cmd_emit(args: argparse.Namespace) -> None:
         f.flush()
         os.fsync(f.fileno())
 
-    # Update index
-    flat = flatten_entry(entry, schema)
-    conn, _, sql = ensure_db(notebook_dir, schema)
-    try:
-        upsert_entry(conn, flat, sql)
-    except sqlite3.OperationalError:
-        print("Error: SQLite schema is out of date. Run 'lab-notebook rebuild'.",
-              file=sys.stderr)
-        print("(The JSONL entry was saved successfully.)", file=sys.stderr)
-        sys.exit(1)
-    finally:
-        conn.close()
-
     print(f"[{entry['type']}] {entry['id']}  {entry['context']}")
 
 
@@ -539,15 +557,8 @@ def cmd_rebuild(args: argparse.Namespace) -> None:
     schema = load_schema(notebook_dir)
     sql = build_sql(schema)
     dbp = index_path(notebook_dir)
-    if dbp.exists():
-        dbp.unlink()
-    conn = sqlite3.connect(str(dbp))
-    conn.executescript(sql.create)
-    try:
-        count = rebuild_from_jsonl(conn, notebook_dir, schema, sql)
-        print(f"Rebuilt index: {count} entries from {entries_dir(notebook_dir)}")
-    finally:
-        conn.close()
+    count = _atomic_rebuild(notebook_dir, dbp, schema, sql)
+    print(f"Rebuilt index: {count} entries from {entries_dir(notebook_dir)}")
 
 
 def cmd_contexts(args: argparse.Namespace) -> None:
