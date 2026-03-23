@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import secrets
@@ -319,22 +320,10 @@ def print_table(cursor: sqlite3.Cursor) -> None:
         print("(no results)")
         return
     cols = [desc[0] for desc in cursor.description]
-    widths = [len(c) for c in cols]
-    str_rows = []
+    writer = csv.writer(sys.stdout, delimiter="|", lineterminator="\n")
+    writer.writerow(cols)
     for row in rows:
-        str_row = [str(v) if v is not None else "" for v in row]
-        str_rows.append(str_row)
-        for i, v in enumerate(str_row):
-            widths[i] = max(widths[i], len(v))
-    max_col = 80
-    widths = [min(w, max_col) for w in widths]
-    header = "  ".join(c.ljust(widths[i]) for i, c in enumerate(cols))
-    sep = "  ".join("-" * widths[i] for i in range(len(cols)))
-    print(header)
-    print(sep)
-    for str_row in str_rows:
-        line = "  ".join(str_row[i][:max_col].ljust(widths[i]) for i in range(len(cols)))
-        print(line)
+        writer.writerow(str(v) if v is not None else "" for v in row)
     print(f"\n({len(rows)} row{'s' if len(rows) != 1 else ''})")
 
 
