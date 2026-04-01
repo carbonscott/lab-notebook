@@ -105,6 +105,10 @@ def load_schema(notebook_dir: Path) -> dict:
             print(f"Error: field '{name}' must be a mapping (e.g. {{type: text}}), "
                   f"got '{spec}'.", file=sys.stderr)
             sys.exit(1)
+        if name in BUILTIN_FIELDS and spec.get("type") != BUILTIN_FIELDS[name]["type"]:
+            print(f"Error: field '{name}' is a built-in {BUILTIN_FIELDS[name]['type']} field "
+                  f"and cannot be redeclared as type '{spec.get('type')}'.", file=sys.stderr)
+            sys.exit(1)
         ftype = spec.get("type")
         if ftype not in VALID_FIELD_TYPES:
             print(f"Error: field '{name}' has invalid type '{ftype}'. "

@@ -176,6 +176,20 @@ class TestSchema:
         assert "artifacts" in schema["fields"]
         assert schema["fields"]["artifacts"]["type"] == "list"
 
+    def test_builtin_field_type_override_rejected(self, notebook):
+        (notebook / "schema.yaml").write_text(
+            "types:\n  - observation\nfields:\n  artifacts: {type: integer}\n"
+        )
+        with pytest.raises(SystemExit):
+            load_schema(notebook)
+
+    def test_builtin_field_same_type_allowed(self, notebook):
+        (notebook / "schema.yaml").write_text(
+            "types:\n  - observation\nfields:\n  artifacts: {type: list}\n"
+        )
+        schema = load_schema(notebook)
+        assert schema["fields"]["artifacts"]["type"] == "list"
+
     def test_schema_field_spec_not_dict(self, notebook):
         (notebook / "schema.yaml").write_text(
             "types:\n  - observation\nfields:\n  repo: text\n"
