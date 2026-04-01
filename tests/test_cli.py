@@ -92,6 +92,7 @@ def make_custom_emit_args(**kwargs):
         "gpu_hours": None,
         "num_nodes": None,
         "tags": None,
+        "artifacts": None,
         "extra": None,
         "content": "Test content",
     }
@@ -112,6 +113,7 @@ class TestInit:
         cmd_init(args)
 
         assert (target / "entries").is_dir()
+        assert (target / "artifacts").is_dir()
         assert (target / ".gitignore").exists()
         assert "index.sqlite" in (target / ".gitignore").read_text()
         assert (target / ".env").exists()
@@ -170,7 +172,9 @@ class TestSchema:
             "types:\n  - observation\nfields:\n"
         )
         schema = load_schema(notebook)
-        assert schema["fields"] == {}
+        # BUILTIN_FIELDS are merged in even when schema declares no fields
+        assert "artifacts" in schema["fields"]
+        assert schema["fields"]["artifacts"]["type"] == "list"
 
     def test_schema_field_spec_not_dict(self, notebook):
         (notebook / "schema.yaml").write_text(
@@ -305,6 +309,22 @@ class TestEmit:
         writer_file = entries_dir(custom_notebook) / "test-writer.jsonl"
         line = json.loads(writer_file.read_text().strip())
         assert line["tags"] == ["mae", "vit", "scaling"]
+
+    def test_artifacts_builtin_on_custom_schema(self, custom_notebook):
+        """artifacts is available even when the schema does not declare it."""
+        cmd_emit(make_custom_emit_args(
+            artifacts="artifacts/notes.md, artifacts/plot.png",
+            content="Custom schema with artifacts",
+        ))
+
+        writer_file = entries_dir(custom_notebook) / "test-writer.jsonl"
+        line = json.loads(writer_file.read_text().strip())
+        assert line["artifacts"] == ["artifacts/notes.md", "artifacts/plot.png"]
+
+        conn, _, _ = ensure_db(custom_notebook)
+        rows = conn.execute("SELECT artifacts FROM entries").fetchall()
+        conn.close()
+        assert json.loads(rows[0][0]) == ["artifacts/notes.md", "artifacts/plot.png"]
 
     def test_extra_escape_hatch(self, notebook):
         cmd_emit(make_emit_args(extra=["foo=bar", "num=42"], content="With extras"))

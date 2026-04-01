@@ -18,4 +18,3 @@ fields:
   repo:       {type: text}              # source repo (e.g. research-lrn091)
   branch:     {type: text}              # branch name
   tags:       {type: list}              # comma-separated on CLI, stored as JSON array
-  artifacts:  {type: list}              # paths to outputs (e.g. repo:results/fig1.png)

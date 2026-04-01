@@ -28,6 +28,7 @@ from pathlib import Path
 import yaml
 
 CORE_FIELDS = ("id", "ts", "writer_id", "context", "type", "content")
+BUILTIN_FIELDS = {"artifacts": {"type": "list"}}  # always present, nullable; merged into every schema
 VALID_FIELD_TYPES = ("text", "integer", "real", "list")
 TYPE_MAP = {"text": "TEXT", "integer": "INTEGER", "real": "REAL", "list": "TEXT"}
 
@@ -109,6 +110,10 @@ def load_schema(notebook_dir: Path) -> dict:
             print(f"Error: field '{name}' has invalid type '{ftype}'. "
                   f"Must be one of {VALID_FIELD_TYPES}.", file=sys.stderr)
             sys.exit(1)
+    # Merge built-in fields; user-declared fields take precedence
+    for name, spec in BUILTIN_FIELDS.items():
+        if name not in fields:
+            fields[name] = spec
     return schema
 
 
@@ -402,6 +407,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     edir = target / "entries"
     edir.mkdir(exist_ok=True)
+    (target / "artifacts").mkdir(exist_ok=True)
 
     gitignore = target / ".gitignore"
     if not gitignore.exists():
@@ -430,6 +436,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     print(f"Initialized lab notebook in {target}")
     print(f"  entries/       per-writer JSONL files")
+    print(f"  artifacts/     files referenced via --artifacts")
     print(f"  schema.yaml    {schema_msg}")
     print(f"  .gitignore     ignores index.sqlite")
     print(f"  .env           LAB_NOTEBOOK_DIR={target}")
@@ -609,6 +616,8 @@ def main() -> None:
     p_emit = sub.add_parser("emit", help="Write a notebook entry")
     p_emit.add_argument("--context", required=True, help="Research context (e.g. maxie/ssl-comparison)")
     p_emit.add_argument("--type", required=True, help="Entry type (defined in schema.yaml)")
+    p_emit.add_argument("--artifacts", default=None,
+                        help="Files referenced by this entry (comma-separated paths)")
     p_emit.add_argument("--extra", action="append", metavar="KEY=VALUE",
                         help="Extra undeclared field (repeatable)")
     p_emit.add_argument("content", help="Entry content (notebook prose)")
@@ -622,6 +631,8 @@ def main() -> None:
         if sf.exists():
             _parsed_schema = load_schema(nb_dir)
             for name, spec in _parsed_schema.get("fields", {}).items():
+                if name in BUILTIN_FIELDS:
+                    continue  # already added as a static argument
                 ftype = spec.get("type", "text")
                 help_text = f"Schema field ({ftype})"
                 if ftype == "list":

@@ -28,4 +28,3 @@ fields:
   loss:       {type: real}              # final or best loss value
   metric:     {type: text}              # summary metric (e.g. val_acc=0.83)
   tags:       {type: list}              # comma-separated on CLI
-  artifacts:  {type: list}              # paths to checkpoints, plots, configs
