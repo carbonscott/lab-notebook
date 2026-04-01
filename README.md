@@ -75,7 +75,6 @@ fields:
   repo:       {type: text}
   branch:     {type: text}
   tags:       {type: list}
-  artifacts:  {type: list}
   dataset:    {type: text, fts: true}   # additional field
   gpu_hours:  {type: real}              # additional field
   num_nodes:  {type: integer}           # additional field
@@ -86,6 +85,8 @@ the CLI, stored as a JSON array in JSONL).
 
 **Full-text search:** Add `fts: true` to include a field in the FTS5 index.
 `content` is always indexed.
+
+**Built-in fields:** `artifacts` is always available on `emit` (comma-separated paths, stored as a JSON array). It does not need to be declared in `schema.yaml` and cannot be redeclared.
 
 **`--extra`:** For one-off fields not in the schema, use `--extra key=value`
 (repeatable). These are stored in the JSONL and in a JSON blob column in SQLite.

@@ -183,12 +183,12 @@ class TestSchema:
         with pytest.raises(SystemExit):
             load_schema(notebook)
 
-    def test_builtin_field_same_type_allowed(self, notebook):
+    def test_builtin_field_same_type_also_rejected(self, notebook):
         (notebook / "schema.yaml").write_text(
             "types:\n  - observation\nfields:\n  artifacts: {type: list}\n"
         )
-        schema = load_schema(notebook)
-        assert schema["fields"]["artifacts"]["type"] == "list"
+        with pytest.raises(SystemExit):
+            load_schema(notebook)
 
     def test_schema_field_spec_not_dict(self, notebook):
         (notebook / "schema.yaml").write_text(
@@ -219,6 +219,8 @@ class TestSchema:
         assert "gpu_hours" in out
         assert "(fts)" in out
         assert "observation" in out
+        assert "artifacts" in out
+        assert "built-in" in out
 
     def test_custom_types_validation(self, custom_notebook):
         cmd_emit(make_custom_emit_args(type="result", content="A result"))
@@ -362,6 +364,10 @@ class TestEmit:
     def test_extra_rejects_core_field_collision(self, notebook):
         with pytest.raises(SystemExit):
             cmd_emit(make_emit_args(extra=["context=sneaky"], content="Should fail"))
+
+    def test_extra_rejects_builtin_field_collision(self, notebook):
+        with pytest.raises(SystemExit):
+            cmd_emit(make_emit_args(extra=["artifacts=sneaky"], content="Should fail"))
 
     def test_extra_rejects_custom_schema_field_collision(self, custom_notebook):
         with pytest.raises(SystemExit):
@@ -530,7 +536,6 @@ class TestRebuild:
             "  repo: {type: text}\n"
             "  branch: {type: text}\n"
             "  tags: {type: list}\n"
-            "  artifacts: {type: list}\n"
             "  new_field: {type: text}\n"
         )
         # Emit succeeds (JSONL-only, no SQLite interaction)

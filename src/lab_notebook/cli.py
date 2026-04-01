@@ -71,7 +71,8 @@ def format_schema_help(schema: dict) -> str:
     for name, spec in fields.items():
         sqltype = TYPE_MAP[spec["type"]]
         fts_note = " (fts)" if spec.get("fts") else ""
-        lines.append(f"  {name:<12} {sqltype:<18} -- schema field{fts_note}")
+        label = "built-in" if name in BUILTIN_FIELDS else "schema field"
+        lines.append(f"  {name:<12} {sqltype:<18} -- {label}{fts_note}")
     lines.append(f"  {'extra':<12} {'TEXT':<18} -- JSON blob for --extra fields")
     lines.append("")
     fts_cols = ["content"] + [n for n, s in fields.items() if s.get("fts")]
@@ -105,16 +106,16 @@ def load_schema(notebook_dir: Path) -> dict:
             print(f"Error: field '{name}' must be a mapping (e.g. {{type: text}}), "
                   f"got '{spec}'.", file=sys.stderr)
             sys.exit(1)
-        if name in BUILTIN_FIELDS and spec.get("type") != BUILTIN_FIELDS[name]["type"]:
-            print(f"Error: field '{name}' is a built-in {BUILTIN_FIELDS[name]['type']} field "
-                  f"and cannot be redeclared as type '{spec.get('type')}'.", file=sys.stderr)
+        if name in BUILTIN_FIELDS:
+            print(f"Error: field '{name}' is built-in and cannot be redeclared in schema.",
+                  file=sys.stderr)
             sys.exit(1)
         ftype = spec.get("type")
         if ftype not in VALID_FIELD_TYPES:
             print(f"Error: field '{name}' has invalid type '{ftype}'. "
                   f"Must be one of {VALID_FIELD_TYPES}.", file=sys.stderr)
             sys.exit(1)
-    # Merge built-in fields; user-declared fields take precedence
+    # Merge built-in fields (user redeclaration is rejected above)
     for name, spec in BUILTIN_FIELDS.items():
         if name not in fields:
             fields[name] = spec
