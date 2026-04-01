@@ -249,6 +249,7 @@ class TestEmit:
         assert line["writer_id"] == "test-writer"
         assert "id" in line
         assert "ts" in line
+        assert "artifacts" in line  # built-in field always present
 
         # Index is built lazily on query, not during emit
         conn, _, _ = ensure_db(notebook)

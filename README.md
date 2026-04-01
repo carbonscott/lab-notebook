@@ -99,11 +99,11 @@ Run `lab-notebook rebuild` after changing `schema.yaml`.
 ### `init [path] [--template NAME]`
 
 Initialize a notebook in an existing directory (default: cwd). Creates
-`entries/`, `schema.yaml`, `.gitignore`, and `.env`. Use `--template` to pick
+`entries/`, `artifacts/`, `schema.yaml`, `.gitignore`, and `.env`. Use `--template` to pick
 a schema template (default: `research-notebook`). Pass `--template` with no
 value to list available templates.
 
-### `emit --context X --type Y [--field ...] [--extra K=V] "content"`
+### `emit --context X --type Y [--artifacts ...] [--field ...] [--extra K=V] "content"`
 
 Write a notebook entry. Required: `--context`, `--type`, content.
 Custom field flags (e.g. `--repo`, `--tags`) are generated from `schema.yaml`.
@@ -143,6 +143,7 @@ my-notebook/
 │   ├── cong.jsonl
 │   ├── intern-alice.jsonl
 │   └── agent-claude-01.jsonl
+├── artifacts/        # tracked; store files referenced via --artifacts
 ├── schema.yaml       # field definitions and entry types
 ├── index.sqlite      # gitignored, rebuilt on demand
 ├── .gitignore
