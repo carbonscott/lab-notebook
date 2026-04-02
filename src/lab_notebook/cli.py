@@ -182,15 +182,58 @@ def build_sql(schema: dict) -> SchemaSQL:
 # Helpers
 # ---------------------------------------------------------------------------
 
+LNB_ENV_FILE = ".lnb.env"
+
+
+def _find_lnb_env(start: Path | None = None) -> Path | None:
+    """Walk up from *start* looking for .lnb.env, stop at $HOME or /."""
+    cur = (start or Path.cwd()).resolve()
+    home = Path.home()
+    while True:
+        candidate = cur / LNB_ENV_FILE
+        if candidate.is_file():
+            return candidate
+        if cur == home or cur == cur.parent:
+            return None
+        cur = cur.parent
+
+
+def _parse_lnb_env(env_file: Path) -> str | None:
+    """Extract LAB_NOTEBOOK_DIR value from a .lnb.env file."""
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Strip optional 'export ' prefix
+        if line.startswith("export "):
+            line = line[7:]
+        if line.startswith("LAB_NOTEBOOK_DIR="):
+            val = line.split("=", 1)[1]
+            # Strip surrounding quotes
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                val = val[1:-1]
+            return val
+    return None
+
+
 def get_notebook_dir(hint: str = "") -> Path:
+    # 1. Check for .lnb.env (walk up from CWD)
+    env_file = _find_lnb_env()
+    if env_file:
+        val = _parse_lnb_env(env_file)
+        if val:
+            return Path(val)
+    # 2. Fall back to environment variable
     d = os.environ.get("LAB_NOTEBOOK_DIR")
     if d:
         return Path(d)
-    print("Error: LAB_NOTEBOOK_DIR environment variable is not set.", file=sys.stderr)
+    # 3. Error
+    print("Error: LAB_NOTEBOOK_DIR is not set and no .lnb.env found.", file=sys.stderr)
     if hint:
         print(hint, file=sys.stderr)
     else:
-        print("Run 'lab-notebook init' to create a notebook, then source the .env file.",
+        print("Run 'lab-notebook init --local' to set up a project notebook,\n"
+              "or set $LAB_NOTEBOOK_DIR in your shell profile.",
               file=sys.stderr)
     sys.exit(1)
 
@@ -400,7 +443,15 @@ def cmd_init(args: argparse.Namespace) -> None:
         print_templates()
         return
 
-    target = Path(args.path or ".").resolve()
+    local = getattr(args, "local", False)
+
+    if local:
+        # --local: default notebook path is .lnb in CWD
+        target = Path(args.path or ".lnb").resolve()
+        target.mkdir(parents=True, exist_ok=True)
+    else:
+        target = Path(args.path or ".").resolve()
+
     if not target.exists():
         print(f"Error: directory does not exist: {target}", file=sys.stderr)
         sys.exit(1)
@@ -433,20 +484,39 @@ def cmd_init(args: argparse.Namespace) -> None:
         schema_msg = "already exists (kept)"
 
     writer = os.environ.get("USER", "unknown")
-    env_file = target / ".env"
-    env_file.write_text(
-        f"export LAB_NOTEBOOK_DIR={target}\n"
-        f"export LAB_NOTEBOOK_WRITER={writer}\n"
-    )
 
-    print(f"Initialized lab notebook in {target}")
-    print(f"  entries/       per-writer JSONL files")
-    print(f"  artifacts/     files referenced via --artifacts")
-    print(f"  schema.yaml    {schema_msg}")
-    print(f"  .gitignore     ignores index.sqlite")
-    print(f"  .env           LAB_NOTEBOOK_DIR={target}")
-    print(f"                 LAB_NOTEBOOK_WRITER={writer}")
-    print(f"\nNext: source {env_file}")
+    if local:
+        # Write .lnb.env in CWD (not inside the notebook dir)
+        lnb_env = Path.cwd() / LNB_ENV_FILE
+        lnb_env.write_text(
+            f"# Project-local lab-notebook configuration\n"
+            f"export LAB_NOTEBOOK_DIR={target}\n"
+            f"export LAB_NOTEBOOK_WRITER={writer}\n"
+        )
+        print(f"Initialized lab notebook in {target}")
+        print(f"  entries/       per-writer JSONL files")
+        print(f"  artifacts/     files referenced via --artifacts")
+        print(f"  schema.yaml    {schema_msg}")
+        print(f"  .gitignore     ignores index.sqlite")
+        print(f"\nCreated {lnb_env.name} in {lnb_env.parent}")
+        print(f"  LAB_NOTEBOOK_DIR={target}")
+        print(f"\nConsider adding to .gitignore:")
+        print(f"  {LNB_ENV_FILE}")
+        print(f"  .lnb/")
+    else:
+        env_file = target / ".env"
+        env_file.write_text(
+            f"export LAB_NOTEBOOK_DIR={target}\n"
+            f"export LAB_NOTEBOOK_WRITER={writer}\n"
+        )
+        print(f"Initialized lab notebook in {target}")
+        print(f"  entries/       per-writer JSONL files")
+        print(f"  artifacts/     files referenced via --artifacts")
+        print(f"  schema.yaml    {schema_msg}")
+        print(f"  .gitignore     ignores index.sqlite")
+        print(f"  .env           LAB_NOTEBOOK_DIR={target}")
+        print(f"                 LAB_NOTEBOOK_WRITER={writer}")
+        print(f"\nNext: source {env_file}")
 
 
 def cmd_emit(args: argparse.Namespace) -> None:
@@ -613,6 +683,8 @@ def main() -> None:
     p_init = sub.add_parser("init", help="Initialize a notebook directory")
     p_init.add_argument("path", nargs="?", default=None,
                         help="Directory to initialize (default: current directory)")
+    p_init.add_argument("--local", action="store_true",
+                        help="Create .lnb.env in CWD for project-local notebook (default path: .lnb)")
     p_init.add_argument("--template", nargs="?", const="", default=None,
                         help="Schema template to use (omit value to list available templates)")
     p_init.set_defaults(func=cmd_init)
@@ -627,9 +699,10 @@ def main() -> None:
                         help="Extra undeclared field (repeatable)")
     p_emit.add_argument("content", help="Entry content (notebook prose)")
 
-    # Dynamically add schema-defined fields if LAB_NOTEBOOK_DIR is set
+    # Dynamically add schema-defined fields if a notebook can be found
     _parsed_schema = None
-    notebook_env = os.environ.get("LAB_NOTEBOOK_DIR")
+    env_file = _find_lnb_env()
+    notebook_env = (_parse_lnb_env(env_file) if env_file else None) or os.environ.get("LAB_NOTEBOOK_DIR")
     if notebook_env:
         nb_dir = Path(notebook_env)
         sf = nb_dir / "schema.yaml"

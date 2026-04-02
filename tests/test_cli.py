@@ -10,7 +10,10 @@ from pathlib import Path
 import pytest
 
 from lab_notebook.cli import (
+    LNB_ENV_FILE,
+    _find_lnb_env,
     _index_is_stale,
+    _parse_lnb_env,
     cmd_contexts,
     cmd_emit,
     cmd_init,
@@ -21,6 +24,7 @@ from lab_notebook.cli import (
     cmd_template,
     ensure_db,
     entries_dir,
+    get_notebook_dir,
     get_template_path,
     index_path,
     list_templates,
@@ -780,3 +784,129 @@ class TestInitTemplate:
         cmd_init(args)
         out = capsys.readouterr().out
         assert "overwritten" in out
+
+
+# ---------------------------------------------------------------------------
+# .lnb.env discovery tests
+# ---------------------------------------------------------------------------
+
+
+class TestLnbEnvDiscovery:
+    """Tests for .lnb.env file discovery and parsing."""
+
+    def test_find_lnb_env_in_cwd(self, tmp_path):
+        env_file = tmp_path / LNB_ENV_FILE
+        env_file.write_text(f"export LAB_NOTEBOOK_DIR={tmp_path}/nb\n")
+        result = _find_lnb_env(start=tmp_path)
+        assert result == env_file
+
+    def test_find_lnb_env_walk_up(self, tmp_path):
+        env_file = tmp_path / LNB_ENV_FILE
+        env_file.write_text(f"export LAB_NOTEBOOK_DIR={tmp_path}/nb\n")
+        subdir = tmp_path / "a" / "b"
+        subdir.mkdir(parents=True)
+        result = _find_lnb_env(start=subdir)
+        assert result == env_file
+
+    def test_find_lnb_env_not_found(self, tmp_path):
+        result = _find_lnb_env(start=tmp_path)
+        assert result is None
+
+    def test_parse_lnb_env_basic(self, tmp_path):
+        env_file = tmp_path / LNB_ENV_FILE
+        env_file.write_text("export LAB_NOTEBOOK_DIR=/some/path\n")
+        assert _parse_lnb_env(env_file) == "/some/path"
+
+    def test_parse_lnb_env_quoted(self, tmp_path):
+        env_file = tmp_path / LNB_ENV_FILE
+        env_file.write_text('export LAB_NOTEBOOK_DIR="/some/path"\n')
+        assert _parse_lnb_env(env_file) == "/some/path"
+
+    def test_parse_lnb_env_no_export(self, tmp_path):
+        env_file = tmp_path / LNB_ENV_FILE
+        env_file.write_text("LAB_NOTEBOOK_DIR=/some/path\n")
+        assert _parse_lnb_env(env_file) == "/some/path"
+
+    def test_parse_lnb_env_with_comments(self, tmp_path):
+        env_file = tmp_path / LNB_ENV_FILE
+        env_file.write_text(
+            "# Project notebook config\n"
+            "export LAB_NOTEBOOK_DIR=/some/path\n"
+            "export LAB_NOTEBOOK_WRITER=alice\n"
+        )
+        assert _parse_lnb_env(env_file) == "/some/path"
+
+    def test_parse_lnb_env_empty_file(self, tmp_path):
+        env_file = tmp_path / LNB_ENV_FILE
+        env_file.write_text("")
+        assert _parse_lnb_env(env_file) is None
+
+    def test_get_notebook_dir_from_lnb_env(self, tmp_path, monkeypatch):
+        nb_dir = tmp_path / "nb"
+        nb_dir.mkdir()
+        env_file = tmp_path / LNB_ENV_FILE
+        env_file.write_text(f"export LAB_NOTEBOOK_DIR={nb_dir}\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("LAB_NOTEBOOK_DIR", raising=False)
+        assert get_notebook_dir() == nb_dir
+
+    def test_get_notebook_dir_env_fallback(self, tmp_path, monkeypatch):
+        nb_dir = tmp_path / "nb"
+        nb_dir.mkdir()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("LAB_NOTEBOOK_DIR", str(nb_dir))
+        # No .lnb.env — should fall back to env var
+        assert get_notebook_dir() == nb_dir
+
+    def test_get_notebook_dir_lnb_env_precedence(self, tmp_path, monkeypatch):
+        local_nb = tmp_path / "local-nb"
+        local_nb.mkdir()
+        global_nb = tmp_path / "global-nb"
+        global_nb.mkdir()
+        env_file = tmp_path / LNB_ENV_FILE
+        env_file.write_text(f"export LAB_NOTEBOOK_DIR={local_nb}\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("LAB_NOTEBOOK_DIR", str(global_nb))
+        # .lnb.env should win over $LAB_NOTEBOOK_DIR
+        assert get_notebook_dir() == local_nb
+
+
+class TestInitLocal:
+    """Tests for lab-notebook init --local."""
+
+    def test_init_local_creates_lnb_env(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        args = argparse.Namespace(path=None, template=None, local=True)
+        cmd_init(args)
+        lnb_env = tmp_path / LNB_ENV_FILE
+        assert lnb_env.exists()
+        content = lnb_env.read_text()
+        assert "LAB_NOTEBOOK_DIR=" in content
+        assert ".lnb" in content
+
+    def test_init_local_creates_notebook_dir(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        args = argparse.Namespace(path=None, template=None, local=True)
+        cmd_init(args)
+        nb_dir = tmp_path / ".lnb"
+        assert nb_dir.is_dir()
+        assert (nb_dir / "schema.yaml").exists()
+        assert (nb_dir / "entries").is_dir()
+
+    def test_init_local_custom_path(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        args = argparse.Namespace(path="my-notebook", template=None, local=True)
+        cmd_init(args)
+        nb_dir = tmp_path / "my-notebook"
+        assert nb_dir.is_dir()
+        lnb_env = tmp_path / LNB_ENV_FILE
+        content = lnb_env.read_text()
+        assert str(nb_dir) in content
+
+    def test_init_without_local_unchanged(self, tmp_path, capsys):
+        """Regular init (no --local) still works as before."""
+        args = argparse.Namespace(path=str(tmp_path), template=None, local=False)
+        cmd_init(args)
+        # Should create .env inside the notebook dir, not .lnb.env
+        assert (tmp_path / ".env").exists()
+        assert not (tmp_path / LNB_ENV_FILE).exists()
