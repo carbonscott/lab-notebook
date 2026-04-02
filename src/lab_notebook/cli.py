@@ -488,6 +488,8 @@ def cmd_init(args: argparse.Namespace) -> None:
     if local:
         # Write .lnb.env in CWD (not inside the notebook dir)
         lnb_env = Path.cwd() / LNB_ENV_FILE
+        if lnb_env.exists():
+            print(f"Warning: overwriting existing {lnb_env}", file=sys.stderr)
         lnb_env.write_text(
             f"# Project-local lab-notebook configuration\n"
             f"export LAB_NOTEBOOK_DIR={target}\n"
@@ -699,23 +701,27 @@ def main() -> None:
                         help="Extra undeclared field (repeatable)")
     p_emit.add_argument("content", help="Entry content (notebook prose)")
 
-    # Dynamically add schema-defined fields if a notebook can be found
+    # Dynamically add schema-defined fields if a notebook can be found.
+    # Best-effort: don't crash arg parsing if the path is stale or schema is bad.
     _parsed_schema = None
-    env_file = _find_lnb_env()
-    notebook_env = (_parse_lnb_env(env_file) if env_file else None) or os.environ.get("LAB_NOTEBOOK_DIR")
-    if notebook_env:
-        nb_dir = Path(notebook_env)
-        sf = nb_dir / "schema.yaml"
-        if sf.exists():
-            _parsed_schema = load_schema(nb_dir)
-            for name, spec in _parsed_schema.get("fields", {}).items():
-                if name in BUILTIN_FIELDS:
-                    continue  # already added as a static argument
-                ftype = spec.get("type", "text")
-                help_text = f"Schema field ({ftype})"
-                if ftype == "list":
-                    help_text = f"Schema field ({ftype}, comma-separated)"
-                p_emit.add_argument(f"--{name}", default=None, help=help_text)
+    try:
+        env_file = _find_lnb_env()
+        notebook_env = (_parse_lnb_env(env_file) if env_file else None) or os.environ.get("LAB_NOTEBOOK_DIR")
+        if notebook_env:
+            nb_dir = Path(notebook_env)
+            sf = nb_dir / "schema.yaml"
+            if sf.exists():
+                _parsed_schema = load_schema(nb_dir)
+                for name, spec in _parsed_schema.get("fields", {}).items():
+                    if name in BUILTIN_FIELDS:
+                        continue  # already added as a static argument
+                    ftype = spec.get("type", "text")
+                    help_text = f"Schema field ({ftype})"
+                    if ftype == "list":
+                        help_text = f"Schema field ({ftype}, comma-separated)"
+                    p_emit.add_argument(f"--{name}", default=None, help=help_text)
+    except (SystemExit, Exception):
+        pass  # schema loading failed — emit will load schema at runtime
 
     p_emit.set_defaults(func=cmd_emit, _schema=_parsed_schema)
 
