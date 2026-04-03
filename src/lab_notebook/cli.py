@@ -443,7 +443,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         print_templates()
         return
 
-    target = Path(args.path or ".lnb").resolve()
+    target = (Path(args.path or ".") / ".lnb").resolve()
     target.mkdir(parents=True, exist_ok=True)
 
     template_name = getattr(args, "template", None) or DEFAULT_TEMPLATE
