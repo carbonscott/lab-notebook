@@ -159,6 +159,7 @@ class TestInit:
         cmd_init(args)
         assert target.is_dir()
         assert (target / "entries").is_dir()
+        assert (tmp_path / LNB_ENV_FILE).exists()
 
 
 # ---------------------------------------------------------------------------

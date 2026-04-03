@@ -490,7 +490,7 @@ def cmd_init(args: argparse.Namespace) -> None:
     print(f"  LAB_NOTEBOOK_DIR={target}")
     print(f"\nConsider adding to .gitignore:")
     print(f"  {LNB_ENV_FILE}")
-    print(f"  .lnb/")
+    print(f"  {target.name}/")
 
 
 def cmd_emit(args: argparse.Namespace) -> None:
@@ -656,7 +656,7 @@ def main() -> None:
     # -- init --
     p_init = sub.add_parser("init", help="Initialize a notebook directory")
     p_init.add_argument("path", nargs="?", default=None,
-                        help="Notebook directory (default: .lnb in current directory)")
+                        help="Notebook root directory (default: .lnb in current directory)")
     p_init.add_argument("--template", nargs="?", const="", default=None,
                         help="Schema template to use (omit value to list available templates)")
     p_init.set_defaults(func=cmd_init)
