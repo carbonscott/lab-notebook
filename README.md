@@ -27,12 +27,12 @@ uv tool install --force git+https://github.com/carbonscott/lab-notebook
 ## Quick Start
 
 ```bash
-# 1. Create a notebook directory and initialize it
-mkdir /path/to/my-notebook
-lab-notebook init /path/to/my-notebook
+# 1. Initialize a project-local notebook (creates .lnb/ and .lnb.env)
+cd /path/to/my-project
+lab-notebook init
 
-# 2. Source the .env (sets LAB_NOTEBOOK_DIR and LAB_NOTEBOOK_WRITER)
-source /path/to/my-notebook/.env
+# 2. Source .lnb.env (sets LAB_NOTEBOOK_DIR and LAB_NOTEBOOK_WRITER)
+source .lnb.env
 
 # 3. Write an entry (CLI args come from schema.yaml)
 lab-notebook emit --context maxie/ssl-comparison --type observation \
@@ -98,10 +98,12 @@ Run `lab-notebook rebuild` after changing `schema.yaml`.
 
 ### `init [path] [--template NAME]`
 
-Initialize a notebook in an existing directory (default: cwd). Creates
-`entries/`, `artifacts/`, `schema.yaml`, `.gitignore`, and `.env`. Use `--template` to pick
-a schema template (default: `research-notebook`). Pass `--template` with no
-value to list available templates.
+Initialize a project-local notebook. Creates `.lnb/` in the current directory
+(or at `path` if given) with `entries/`, `artifacts/`, `schema.yaml`, and
+`.gitignore`. Also writes `.lnb.env` in the current directory for automatic
+notebook discovery. Use `--template` to pick a schema template (default:
+`research-notebook`). Pass `--template` with no value to list available
+templates.
 
 ### `emit --context X --type Y [--artifacts ...] [--field ...] [--extra K=V] "content"`
 
@@ -138,16 +140,17 @@ Run `lab-notebook rebuild` afterward if entries exist.
 ## Data Layout
 
 ```
-my-notebook/
-├── entries/
-│   ├── cong.jsonl
-│   ├── intern-alice.jsonl
-│   └── agent-claude-01.jsonl
-├── artifacts/        # tracked; store files referenced via --artifacts
-├── schema.yaml       # field definitions and entry types
-├── index.sqlite      # gitignored, rebuilt on demand
-├── .gitignore
-└── .env
+my-project/
+├── .lnb/
+│   ├── entries/
+│   │   ├── cong.jsonl
+│   │   ├── intern-alice.jsonl
+│   │   └── agent-claude-01.jsonl
+│   ├── artifacts/        # tracked; store files referenced via --artifacts
+│   ├── schema.yaml       # field definitions and entry types
+│   ├── index.sqlite      # gitignored, rebuilt on demand
+│   └── .gitignore
+└── .lnb.env              # points to .lnb/, source this
 ```
 
 Each writer gets their own JSONL file. No merge conflicts.

@@ -232,7 +232,7 @@ def get_notebook_dir(hint: str = "") -> Path:
     if hint:
         print(hint, file=sys.stderr)
     else:
-        print("Run 'lab-notebook init --local' to set up a project notebook,\n"
+        print("Run 'lab-notebook init' to set up a project notebook,\n"
               "or set $LAB_NOTEBOOK_DIR in your shell profile.",
               file=sys.stderr)
     sys.exit(1)
@@ -443,21 +443,8 @@ def cmd_init(args: argparse.Namespace) -> None:
         print_templates()
         return
 
-    local = getattr(args, "local", False)
-
-    if local:
-        # --local: default notebook path is .lnb in CWD
-        target = Path(args.path or ".lnb").resolve()
-        target.mkdir(parents=True, exist_ok=True)
-    else:
-        target = Path(args.path or ".").resolve()
-
-    if not target.exists():
-        print(f"Error: directory does not exist: {target}", file=sys.stderr)
-        sys.exit(1)
-    if not target.is_dir():
-        print(f"Error: not a directory: {target}", file=sys.stderr)
-        sys.exit(1)
+    target = Path(args.path or ".lnb").resolve()
+    target.mkdir(parents=True, exist_ok=True)
 
     template_name = getattr(args, "template", None) or DEFAULT_TEMPLATE
 
@@ -485,40 +472,25 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     writer = os.environ.get("USER", "unknown")
 
-    if local:
-        # Write .lnb.env in CWD (not inside the notebook dir)
-        lnb_env = Path.cwd() / LNB_ENV_FILE
-        if lnb_env.exists():
-            print(f"Warning: overwriting existing {lnb_env}", file=sys.stderr)
-        lnb_env.write_text(
-            f"# Project-local lab-notebook configuration\n"
-            f"export LAB_NOTEBOOK_DIR={target}\n"
-            f"export LAB_NOTEBOOK_WRITER={writer}\n"
-        )
-        print(f"Initialized lab notebook in {target}")
-        print(f"  entries/       per-writer JSONL files")
-        print(f"  artifacts/     files referenced via --artifacts")
-        print(f"  schema.yaml    {schema_msg}")
-        print(f"  .gitignore     ignores index.sqlite")
-        print(f"\nCreated {lnb_env.name} in {lnb_env.parent}")
-        print(f"  LAB_NOTEBOOK_DIR={target}")
-        print(f"\nConsider adding to .gitignore:")
-        print(f"  {LNB_ENV_FILE}")
-        print(f"  .lnb/")
-    else:
-        env_file = target / ".env"
-        env_file.write_text(
-            f"export LAB_NOTEBOOK_DIR={target}\n"
-            f"export LAB_NOTEBOOK_WRITER={writer}\n"
-        )
-        print(f"Initialized lab notebook in {target}")
-        print(f"  entries/       per-writer JSONL files")
-        print(f"  artifacts/     files referenced via --artifacts")
-        print(f"  schema.yaml    {schema_msg}")
-        print(f"  .gitignore     ignores index.sqlite")
-        print(f"  .env           LAB_NOTEBOOK_DIR={target}")
-        print(f"                 LAB_NOTEBOOK_WRITER={writer}")
-        print(f"\nNext: source {env_file}")
+    # Write .lnb.env in CWD
+    lnb_env = Path.cwd() / LNB_ENV_FILE
+    if lnb_env.exists():
+        print(f"Warning: overwriting existing {lnb_env}", file=sys.stderr)
+    lnb_env.write_text(
+        f"# Project-local lab-notebook configuration\n"
+        f"export LAB_NOTEBOOK_DIR={target}\n"
+        f"export LAB_NOTEBOOK_WRITER={writer}\n"
+    )
+    print(f"Initialized lab notebook in {target}")
+    print(f"  entries/       per-writer JSONL files")
+    print(f"  artifacts/     files referenced via --artifacts")
+    print(f"  schema.yaml    {schema_msg}")
+    print(f"  .gitignore     ignores index.sqlite")
+    print(f"\nCreated {lnb_env.name} in {lnb_env.parent}")
+    print(f"  LAB_NOTEBOOK_DIR={target}")
+    print(f"\nConsider adding to .gitignore:")
+    print(f"  {LNB_ENV_FILE}")
+    print(f"  {target.name}/")
 
 
 def cmd_emit(args: argparse.Namespace) -> None:
@@ -684,9 +656,7 @@ def main() -> None:
     # -- init --
     p_init = sub.add_parser("init", help="Initialize a notebook directory")
     p_init.add_argument("path", nargs="?", default=None,
-                        help="Directory to initialize (default: current directory)")
-    p_init.add_argument("--local", action="store_true",
-                        help="Create .lnb.env in CWD for project-local notebook (default path: .lnb)")
+                        help="Notebook root directory (default: .lnb in current directory)")
     p_init.add_argument("--template", nargs="?", const="", default=None,
                         help="Schema template to use (omit value to list available templates)")
     p_init.set_defaults(func=cmd_init)
