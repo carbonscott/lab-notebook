@@ -31,8 +31,10 @@ from lab_notebook.cli import (
     load_schema,
     build_sql,
     flatten_entry,
+    main,
     print_templates,
     read_template,
+    read_template_from_path,
 )
 
 
@@ -679,6 +681,24 @@ class TestTemplateHelpers:
             assert len(schema["types"]) > 0
             assert isinstance(schema.get("fields", {}), dict)
 
+    def test_read_template_from_path_valid(self, tmp_path):
+        p = tmp_path / "custom.yaml"
+        body = "types:\n  - note\nfields: {}\n"
+        p.write_text(body)
+        assert read_template_from_path(str(p)) == body
+
+    def test_read_template_from_path_missing(self, tmp_path, capsys):
+        missing = tmp_path / "nope.yaml"
+        with pytest.raises(SystemExit):
+            read_template_from_path(str(missing))
+        err = capsys.readouterr().err
+        assert "not found" in err
+        assert str(missing) in err
+
+    def test_read_template_from_path_directory(self, tmp_path):
+        with pytest.raises(SystemExit):
+            read_template_from_path(str(tmp_path))
+
 
 class TestCmdTemplate:
     def test_list_no_args(self, notebook, capsys):
@@ -790,6 +810,67 @@ class TestInitTemplate:
         cmd_init(args)
         out = capsys.readouterr().out
         assert "overwritten" in out
+
+    def test_init_with_template_path(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        custom = tmp_path / "custom.yaml"
+        custom.write_text("types:\n  - note\n  - todo\nfields: {}\n")
+        args = argparse.Namespace(
+            path=str(tmp_path / "nb"), template=None, template_path=str(custom))
+        cmd_init(args)
+        nb_dir = tmp_path / "nb" / ".lnb"
+        assert (nb_dir / "schema.yaml").read_text() == custom.read_text()
+
+    def test_init_template_path_missing_file(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        missing = tmp_path / "does-not-exist.yaml"
+        args = argparse.Namespace(
+            path=str(tmp_path / "nb"), template=None, template_path=str(missing))
+        with pytest.raises(SystemExit):
+            cmd_init(args)
+        err = capsys.readouterr().err
+        assert "not found" in err
+
+    def test_init_template_path_overwrites_existing(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        nb_dir = tmp_path / "nb" / ".lnb"
+        # First init with default
+        args = argparse.Namespace(
+            path=str(tmp_path / "nb"), template=None, template_path=None)
+        cmd_init(args)
+        import yaml
+        schema = yaml.safe_load((nb_dir / "schema.yaml").read_text())
+        assert "observation" in schema["types"]
+        # Re-init with --template-path
+        custom = tmp_path / "custom.yaml"
+        custom.write_text("types:\n  - note\nfields: {}\n")
+        args = argparse.Namespace(
+            path=str(tmp_path / "nb"), template=None, template_path=str(custom))
+        cmd_init(args)
+        schema = yaml.safe_load((nb_dir / "schema.yaml").read_text())
+        assert schema["types"] == ["note"]
+
+    def test_init_template_path_output_message(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        custom = tmp_path / "custom.yaml"
+        custom.write_text("types:\n  - note\nfields: {}\n")
+        args = argparse.Namespace(
+            path=str(tmp_path / "nb"), template=None, template_path=str(custom))
+        cmd_init(args)
+        out = capsys.readouterr().out
+        assert f"from path: {custom}" in out
+
+    def test_init_template_and_template_path_mutex(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        custom = tmp_path / "custom.yaml"
+        custom.write_text("types:\n  - note\nfields: {}\n")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["lab-notebook", "init", "--template", "research-notebook",
+             "--template-path", str(custom)],
+        )
+        with pytest.raises(SystemExit):
+            main()
 
 
 # ---------------------------------------------------------------------------
