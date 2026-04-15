@@ -58,7 +58,8 @@ lab-notebook search "masking"
 Each notebook has a `schema.yaml` that defines entry types and custom fields.
 `lab-notebook init` generates a default one. Run `lab-notebook template` to see
 bundled templates, or use `lab-notebook init --template <name>` to start with a
-specific one.
+specific one. To start from a schema file shipped by your own project, use
+`lab-notebook init --template-path ./my-schema.yaml`.
 
 The default template (`research-notebook`) includes basic fields. You can add
 more to your `schema.yaml`:
@@ -96,14 +97,15 @@ Run `lab-notebook rebuild` after changing `schema.yaml`.
 
 ## Commands
 
-### `init [path] [--template NAME]`
+### `init [path] [--template NAME | --template-path PATH]`
 
 Initialize a project-local notebook. Creates `.lnb/` in the current directory
 (or at `path` if given) with `entries/`, `artifacts/`, `schema.yaml`, and
 `.gitignore`. Also writes `.lnb.env` in the current directory for automatic
-notebook discovery. Use `--template` to pick a schema template (default:
+notebook discovery. Use `--template` to pick a bundled schema template (default:
 `research-notebook`). Pass `--template` with no value to list available
-templates.
+templates. Use `--template-path PATH` to load a schema from an arbitrary YAML
+file on disk (mutually exclusive with `--template`).
 
 ### `emit --context X --type Y [--artifacts ...] [--field ...] [--extra K=V] "content"`
 

@@ -417,6 +417,21 @@ def read_template(name: str) -> str:
     return p.read_text()
 
 
+def read_template_from_path(path: str) -> str:
+    """Read a schema template from an external file path, or exit with error."""
+    p = Path(path)
+    if not p.is_file():
+        print(f"Error: template path not found or not a file: {path}",
+              file=sys.stderr)
+        sys.exit(1)
+    try:
+        return p.read_text()
+    except OSError as e:
+        print(f"Error: failed to read template at {path}: {e}",
+              file=sys.stderr)
+        sys.exit(1)
+
+
 def print_templates() -> None:
     """Print available templates to stdout."""
     if not SCHEMAS_DIR.is_dir():
@@ -446,7 +461,21 @@ def cmd_init(args: argparse.Namespace) -> None:
     target = (Path(args.path or ".") / ".lnb").resolve()
     target.mkdir(parents=True, exist_ok=True)
 
-    template_name = getattr(args, "template", None) or DEFAULT_TEMPLATE
+    template_path = getattr(args, "template_path", None)
+    template_name = getattr(args, "template", None)
+
+    if template_path is not None:
+        schema_text = read_template_from_path(template_path)
+        schema_source = f"from path: {template_path}"
+        explicit = True
+    elif template_name is not None:
+        schema_text = read_template(template_name)
+        schema_source = f"from template: {template_name}"
+        explicit = True
+    else:
+        schema_text = read_template(DEFAULT_TEMPLATE)
+        schema_source = f"from template: {DEFAULT_TEMPLATE}"
+        explicit = False
 
     edir = target / "entries"
     edir.mkdir(exist_ok=True)
@@ -460,13 +489,12 @@ def cmd_init(args: argparse.Namespace) -> None:
             f.write("index.sqlite\n")
 
     sf = target / "schema.yaml"
-    template_explicit = getattr(args, "template", None) is not None
     if not sf.exists():
-        sf.write_text(read_template(template_name))
-        schema_msg = f"from template: {template_name}"
-    elif template_explicit:
-        sf.write_text(read_template(template_name))
-        schema_msg = f"from template: {template_name} (overwritten)"
+        sf.write_text(schema_text)
+        schema_msg = schema_source
+    elif explicit:
+        sf.write_text(schema_text)
+        schema_msg = f"{schema_source} (overwritten)"
     else:
         schema_msg = "already exists (kept)"
 
@@ -657,8 +685,11 @@ def main() -> None:
     p_init = sub.add_parser("init", help="Initialize a notebook directory")
     p_init.add_argument("path", nargs="?", default=None,
                         help="Notebook root directory (default: .lnb in current directory)")
-    p_init.add_argument("--template", nargs="?", const="", default=None,
-                        help="Schema template to use (omit value to list available templates)")
+    tgroup = p_init.add_mutually_exclusive_group()
+    tgroup.add_argument("--template", nargs="?", const="", default=None,
+                        help="Bundled schema template (omit value to list available templates)")
+    tgroup.add_argument("--template-path", default=None, metavar="PATH",
+                        help="Load schema from a YAML file on disk")
     p_init.set_defaults(func=cmd_init)
 
     # -- emit --
