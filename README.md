@@ -53,6 +53,19 @@ lab-notebook search "masking"
 | `LAB_NOTEBOOK_DIR` | Yes | — | Path to notebook data directory |
 | `LAB_NOTEBOOK_WRITER` | No | `$USER` | Writer ID for entries |
 
+### Notebook discovery precedence
+
+When the CLI resolves which notebook to use, it checks sources in this order
+(first match wins):
+
+1. `$LAB_NOTEBOOK_DIR` environment variable (if set and non-empty)
+2. Nearest `.lnb.env` walking up from the current directory (closest wins,
+   stops at `$HOME` or `/`)
+
+Explicit `LAB_NOTEBOOK_DIR=... lab-notebook ...` always wins, so one-shot
+overrides work as expected. For normal project use, `source .lnb.env` after
+`cd`ing into a project so the env var is set for your shell.
+
 ## Schema Configuration
 
 Each notebook has a `schema.yaml` that defines entry types and custom fields.

@@ -217,23 +217,23 @@ def _parse_lnb_env(env_file: Path) -> str | None:
 
 
 def get_notebook_dir(hint: str = "") -> Path:
-    # 1. Check for .lnb.env (walk up from CWD)
+    # 1. Explicit $LAB_NOTEBOOK_DIR wins (standard Unix precedence)
+    d = os.environ.get("LAB_NOTEBOOK_DIR")
+    if d:
+        return Path(d)
+    # 2. Fall back to nearest .lnb.env walking up from CWD
     env_file = _find_lnb_env()
     if env_file:
         val = _parse_lnb_env(env_file)
         if val:
             return Path(val)
-    # 2. Fall back to environment variable
-    d = os.environ.get("LAB_NOTEBOOK_DIR")
-    if d:
-        return Path(d)
     # 3. Error
     print("Error: LAB_NOTEBOOK_DIR is not set and no .lnb.env found.", file=sys.stderr)
     if hint:
         print(hint, file=sys.stderr)
     else:
-        print("Run 'lab-notebook init' to set up a project notebook,\n"
-              "or set $LAB_NOTEBOOK_DIR in your shell profile.",
+        print("Set $LAB_NOTEBOOK_DIR, or run 'lab-notebook init' to create\n"
+              "a project-local notebook (writes .lnb.env in the current directory).",
               file=sys.stderr)
     sys.exit(1)
 
@@ -706,8 +706,10 @@ def main() -> None:
     # Best-effort: don't crash arg parsing if the path is stale or schema is bad.
     _parsed_schema = None
     try:
-        env_file = _find_lnb_env()
-        notebook_env = (_parse_lnb_env(env_file) if env_file else None) or os.environ.get("LAB_NOTEBOOK_DIR")
+        notebook_env = os.environ.get("LAB_NOTEBOOK_DIR")
+        if not notebook_env:
+            env_file = _find_lnb_env()
+            notebook_env = _parse_lnb_env(env_file) if env_file else None
         if notebook_env:
             nb_dir = Path(notebook_env)
             sf = nb_dir / "schema.yaml"
