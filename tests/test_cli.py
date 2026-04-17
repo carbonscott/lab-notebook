@@ -945,17 +945,27 @@ class TestLnbEnvDiscovery:
         # No .lnb.env — should fall back to env var
         assert get_notebook_dir() == nb_dir
 
-    def test_get_notebook_dir_lnb_env_precedence(self, tmp_path, monkeypatch):
+    def test_get_notebook_dir_env_var_precedence(self, tmp_path, monkeypatch):
         local_nb = tmp_path / "local-nb"
         local_nb.mkdir()
-        global_nb = tmp_path / "global-nb"
-        global_nb.mkdir()
+        explicit_nb = tmp_path / "explicit-nb"
+        explicit_nb.mkdir()
         env_file = tmp_path / LNB_ENV_FILE
         env_file.write_text(f"export LAB_NOTEBOOK_DIR={local_nb}\n")
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("LAB_NOTEBOOK_DIR", str(global_nb))
-        # .lnb.env should win over $LAB_NOTEBOOK_DIR
-        assert get_notebook_dir() == local_nb
+        monkeypatch.setenv("LAB_NOTEBOOK_DIR", str(explicit_nb))
+        # $LAB_NOTEBOOK_DIR should win over .lnb.env
+        assert get_notebook_dir() == explicit_nb
+
+    def test_get_notebook_dir_empty_env_var_falls_through(self, tmp_path, monkeypatch):
+        nb_dir = tmp_path / "nb"
+        nb_dir.mkdir()
+        env_file = tmp_path / LNB_ENV_FILE
+        env_file.write_text(f"export LAB_NOTEBOOK_DIR={nb_dir}\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("LAB_NOTEBOOK_DIR", "")
+        # Empty env var should be treated as unset; .lnb.env wins
+        assert get_notebook_dir() == nb_dir
 
 
 class TestInitDefault:
