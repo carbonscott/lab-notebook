@@ -597,6 +597,180 @@ class TestStaleness:
 
 
 # ---------------------------------------------------------------------------
+# incremental ingest
+# ---------------------------------------------------------------------------
+
+
+class TestIncrementalIngest:
+    def _writer_file(self, notebook):
+        return entries_dir(notebook) / "test-writer.jsonl"
+
+    def _read_offset(self, notebook, filename):
+        conn = sqlite3.connect(str(index_path(notebook)))
+        try:
+            row = conn.execute(
+                "SELECT offset FROM _ingest_state WHERE file = ?", (filename,)
+            ).fetchone()
+        finally:
+            conn.close()
+        return row[0] if row else None
+
+    def test_first_read_records_offset(self, notebook):
+        cmd_emit(make_emit_args(content="first entry"))
+        conn, _, _ = ensure_db(notebook)
+        rows = conn.execute("SELECT content FROM entries").fetchall()
+        conn.close()
+        assert [r[0] for r in rows] == ["first entry"]
+        wf = self._writer_file(notebook)
+        assert self._read_offset(notebook, wf.name) == wf.stat().st_size
+
+    def test_incremental_fast_path(self, notebook, capsys):
+        for i in range(3):
+            cmd_emit(make_emit_args(content=f"entry {i}"))
+        ensure_db(notebook)[0].close()
+        wf = self._writer_file(notebook)
+        size_after_3 = wf.stat().st_size
+        assert self._read_offset(notebook, wf.name) == size_after_3
+
+        cmd_emit(make_emit_args(content="entry 3"))
+        capsys.readouterr()  # drain prior output
+        conn, _, _ = ensure_db(notebook)
+        err = capsys.readouterr().err
+        rows = conn.execute("SELECT content FROM entries ORDER BY ts").fetchall()
+        conn.close()
+        assert [r[0] for r in rows] == [f"entry {i}" for i in range(4)]
+        assert "Index updated: +1 entries" in err
+        assert "Index rebuilt" not in err
+        assert self._read_offset(notebook, wf.name) == wf.stat().st_size
+
+    def test_partial_line_at_eof_is_not_skipped(self, notebook):
+        cmd_emit(make_emit_args(content="complete entry"))
+        ensure_db(notebook)[0].close()
+        wf = self._writer_file(notebook)
+        offset_after_complete = self._read_offset(notebook, wf.name)
+        assert offset_after_complete == wf.stat().st_size
+
+        # Append a partial line (no trailing \n).
+        partial = '{"id":"x-partial","ts":"2026'
+        with open(wf, "a") as f:
+            f.write(partial)
+        conn, _, _ = ensure_db(notebook)
+        rows = conn.execute("SELECT id FROM entries").fetchall()
+        conn.close()
+        assert all(r[0] != "x-partial" for r in rows)
+        assert self._read_offset(notebook, wf.name) == offset_after_complete
+
+        # Complete the line; next read picks it up.
+        rest = '-01-01T00:00:00","writer_id":"test-writer","context":"c","type":"observation","content":"finished","extra":null}\n'
+        with open(wf, "a") as f:
+            f.write(rest)
+        conn, _, _ = ensure_db(notebook)
+        rows = conn.execute("SELECT id, content FROM entries WHERE id = 'x-partial'").fetchall()
+        conn.close()
+        assert rows == [("x-partial", "finished")]
+        assert self._read_offset(notebook, wf.name) == wf.stat().st_size
+
+    def test_truncation_falls_back_to_full_rebuild(self, notebook, capsys):
+        cmd_emit(make_emit_args(content="line A"))
+        cmd_emit(make_emit_args(content="line B"))
+        ensure_db(notebook)[0].close()
+        wf = self._writer_file(notebook)
+        # Truncate so size < recorded offset.
+        with open(wf, "r+") as f:
+            full = f.read()
+            first_line = full.split("\n", 1)[0] + "\n"
+            f.seek(0)
+            f.truncate()
+            f.write(first_line)
+        capsys.readouterr()
+        conn, _, _ = ensure_db(notebook)
+        err = capsys.readouterr().err
+        rows = conn.execute("SELECT content FROM entries").fetchall()
+        conn.close()
+        assert [r[0] for r in rows] == ["line A"]
+        assert "fence tripped" in err
+        assert "Index rebuilt" in err
+
+    def test_schema_change_falls_back_to_full_rebuild(self, notebook, capsys):
+        import time
+        cmd_emit(make_emit_args(content="before schema change"))
+        ensure_db(notebook)[0].close()
+        time.sleep(0.05)
+        sf = notebook / "schema.yaml"
+        sf.write_text(sf.read_text() + "\n# touched\n")
+        capsys.readouterr()
+        ensure_db(notebook)[0].close()
+        err = capsys.readouterr().err
+        assert "Index rebuilt" in err
+        assert "Index updated" not in err
+
+    def test_pre_ingest_state_index_migrates_transparently(self, notebook):
+        cmd_emit(make_emit_args(content="entry one"))
+        cmd_emit(make_emit_args(content="entry two"))
+        ensure_db(notebook)[0].close()
+        # Simulate an existing pre-_ingest_state index by dropping the table.
+        conn = sqlite3.connect(str(index_path(notebook)))
+        conn.execute("DROP TABLE _ingest_state")
+        conn.commit()
+        conn.close()
+        # Touch the JSONL so the schema fence is not the trigger here — but the
+        # incremental path also handles size-vs-zero-offset transparently. Still,
+        # we want to verify no crash and idempotent re-ingest.
+        conn, _, _ = ensure_db(notebook)
+        rows = conn.execute("SELECT content FROM entries ORDER BY ts").fetchall()
+        conn.close()
+        assert [r[0] for r in rows] == ["entry one", "entry two"]
+        wf = self._writer_file(notebook)
+        assert self._read_offset(notebook, wf.name) == wf.stat().st_size
+
+    def test_malformed_line_in_middle_advances_past_it(self, notebook, capsys):
+        cmd_emit(make_emit_args(content="good before bad"))
+        ensure_db(notebook)[0].close()
+        wf = self._writer_file(notebook)
+        # Append a bad line then a good line.
+        with open(wf, "a") as f:
+            f.write("{not valid json\n")
+            f.write(json.dumps({
+                "id": "good-after-bad",
+                "ts": "2026-01-01T00:00:00",
+                "writer_id": "test-writer",
+                "context": "c",
+                "type": "observation",
+                "content": "good after bad",
+                "extra": None,
+            }) + "\n")
+        capsys.readouterr()
+        conn, _, _ = ensure_db(notebook)
+        err = capsys.readouterr().err
+        rows = conn.execute("SELECT id, content FROM entries ORDER BY ts").fetchall()
+        conn.close()
+        ids = [r[0] for r in rows]
+        assert "good-after-bad" in ids
+        assert "skipping malformed line" in err
+        assert self._read_offset(notebook, wf.name) == wf.stat().st_size
+
+    def test_only_changed_writer_offset_advances(self, notebook, monkeypatch):
+        cmd_emit(make_emit_args(content="from A"))
+        monkeypatch.setenv("LAB_NOTEBOOK_WRITER", "writer-b")
+        cmd_emit(make_emit_args(content="from B"))
+        ensure_db(notebook)[0].close()
+
+        edir = entries_dir(notebook)
+        a_file = edir / "test-writer.jsonl"
+        b_file = edir / "writer-b.jsonl"
+        a_offset_before = self._read_offset(notebook, a_file.name)
+        b_offset_before = self._read_offset(notebook, b_file.name)
+
+        # Only writer-b appends.
+        cmd_emit(make_emit_args(content="from B again"))
+        ensure_db(notebook)[0].close()
+
+        assert self._read_offset(notebook, a_file.name) == a_offset_before
+        assert self._read_offset(notebook, b_file.name) > b_offset_before
+        assert self._read_offset(notebook, b_file.name) == b_file.stat().st_size
+
+
+# ---------------------------------------------------------------------------
 # multiple writers
 # ---------------------------------------------------------------------------
 
