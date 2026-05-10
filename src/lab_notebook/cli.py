@@ -299,20 +299,6 @@ def upsert_entry(conn: sqlite3.Connection, entry: dict, sql: SchemaSQL,
         conn.commit()
 
 
-def _index_is_stale(notebook_dir: Path, dbp: Path) -> bool:
-    """True if any JSONL file or schema.yaml is newer than the index."""
-    idx_mtime = dbp.stat().st_mtime
-    schema_file = notebook_dir / "schema.yaml"
-    if schema_file.exists() and schema_file.stat().st_mtime >= idx_mtime:
-        return True
-    edir = entries_dir(notebook_dir)
-    if edir.exists():
-        for f in edir.glob("*.jsonl"):
-            if f.stat().st_mtime >= idx_mtime:
-                return True
-    return False
-
-
 def _atomic_rebuild(notebook_dir: Path, dbp: Path,
                      schema: dict, sql: SchemaSQL) -> int:
     """Rebuild the index into a temp file, then atomically rename into place."""
@@ -418,18 +404,21 @@ def ensure_db(notebook_dir: Path, schema: dict | None = None) -> tuple[sqlite3.C
         print(f"Index rebuilt: {count} entries", file=sys.stderr)
     else:
         conn = sqlite3.connect(str(dbp))
+        fence_tripped = None
+        new_count = 0
         try:
             new_count = incremental_ingest(conn, notebook_dir, schema, sql)
         except _IngestFenceTripped as e:
+            fence_tripped = str(e)
+        finally:
             conn.close()
-            print(f"Ingest fence tripped on {e}; falling back to full rebuild",
-                  file=sys.stderr)
+        if fence_tripped is not None:
+            print(f"Ingest fence tripped on {fence_tripped}; "
+                  f"falling back to full rebuild", file=sys.stderr)
             count = _atomic_rebuild(notebook_dir, dbp, schema, sql)
             print(f"Index rebuilt: {count} entries", file=sys.stderr)
-        else:
-            conn.close()
-            if new_count:
-                print(f"Index updated: +{new_count} entries", file=sys.stderr)
+        elif new_count:
+            print(f"Index updated: +{new_count} entries", file=sys.stderr)
     conn = sqlite3.connect(str(dbp))
     return conn, schema, sql
 

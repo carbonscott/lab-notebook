@@ -12,7 +12,6 @@ import pytest
 from lab_notebook.cli import (
     LNB_ENV_FILE,
     _find_lnb_env,
-    _index_is_stale,
     _parse_lnb_env,
     cmd_contexts,
     cmd_emit,
@@ -566,37 +565,6 @@ class TestRebuild:
 
 
 # ---------------------------------------------------------------------------
-# staleness detection
-# ---------------------------------------------------------------------------
-
-
-class TestStaleness:
-    def test_stale_after_new_entry(self, notebook):
-        ensure_db(notebook)
-        cmd_emit(make_emit_args(content="New entry"))
-        assert _index_is_stale(notebook, index_path(notebook))
-
-    def test_fresh_after_rebuild(self, notebook):
-        cmd_emit(make_emit_args(content="An entry"))
-        ensure_db(notebook)
-        # Rebuild just happened — touch the index to ensure it's strictly newer
-        import time
-        time.sleep(0.05)
-        idx = index_path(notebook)
-        idx.touch()
-        assert not _index_is_stale(notebook, idx)
-
-    def test_stale_after_schema_change(self, notebook):
-        ensure_db(notebook)
-        import time
-        time.sleep(0.05)
-        (notebook / "schema.yaml").write_text(
-            (notebook / "schema.yaml").read_text() + "\n# modified\n"
-        )
-        assert _index_is_stale(notebook, index_path(notebook))
-
-
-# ---------------------------------------------------------------------------
 # incremental ingest
 # ---------------------------------------------------------------------------
 
@@ -713,9 +681,8 @@ class TestIncrementalIngest:
         conn.execute("DROP TABLE _ingest_state")
         conn.commit()
         conn.close()
-        # Touch the JSONL so the schema fence is not the trigger here — but the
-        # incremental path also handles size-vs-zero-offset transparently. Still,
-        # we want to verify no crash and idempotent re-ingest.
+        # Re-open: incremental_ingest recreates the table and re-ingests via
+        # idempotent INSERT OR REPLACE.
         conn, _, _ = ensure_db(notebook)
         rows = conn.execute("SELECT content FROM entries ORDER BY ts").fetchall()
         conn.close()
