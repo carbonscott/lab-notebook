@@ -153,6 +153,8 @@ def build_sql(schema: dict) -> SchemaSQL:
         + "CREATE INDEX IF NOT EXISTS idx_entries_context ON entries(context);\n"
         + "CREATE INDEX IF NOT EXISTS idx_entries_type ON entries(type);\n"
         + "CREATE INDEX IF NOT EXISTS idx_entries_ts ON entries(ts);\n"
+        + "CREATE TABLE IF NOT EXISTS _ingest_state ("
+        + "file TEXT PRIMARY KEY, offset INTEGER NOT NULL);\n"
     )
 
     # -- UPSERT --
@@ -297,20 +299,6 @@ def upsert_entry(conn: sqlite3.Connection, entry: dict, sql: SchemaSQL,
         conn.commit()
 
 
-def _index_is_stale(notebook_dir: Path, dbp: Path) -> bool:
-    """True if any JSONL file or schema.yaml is newer than the index."""
-    idx_mtime = dbp.stat().st_mtime
-    schema_file = notebook_dir / "schema.yaml"
-    if schema_file.exists() and schema_file.stat().st_mtime >= idx_mtime:
-        return True
-    edir = entries_dir(notebook_dir)
-    if edir.exists():
-        for f in edir.glob("*.jsonl"):
-            if f.stat().st_mtime >= idx_mtime:
-                return True
-    return False
-
-
 def _atomic_rebuild(notebook_dir: Path, dbp: Path,
                      schema: dict, sql: SchemaSQL) -> int:
     """Rebuild the index into a temp file, then atomically rename into place."""
@@ -328,43 +316,129 @@ def _atomic_rebuild(notebook_dir: Path, dbp: Path,
         raise
 
 
+def _schema_newer_than_index(notebook_dir: Path, dbp: Path) -> bool:
+    schema_file = notebook_dir / "schema.yaml"
+    return schema_file.exists() and schema_file.stat().st_mtime >= dbp.stat().st_mtime
+
+
+class _IngestFenceTripped(Exception):
+    """Raised when a JSONL file's size dropped below its recorded ingest offset."""
+
+
+def incremental_ingest(conn: sqlite3.Connection, notebook_dir: Path,
+                       schema: dict, sql: SchemaSQL) -> int:
+    """Per-file byte-offset incremental ingest. Returns count of newly-inserted entries.
+
+    Raises _IngestFenceTripped if any JSONL file is smaller than its recorded
+    offset (truncation / external rewrite); caller should fall back to full rebuild.
+    """
+    edir = entries_dir(notebook_dir)
+    if not edir.exists():
+        return 0
+    # Defensive: an existing pre-_ingest_state index opened by new code reaches
+    # this path; create the table so absent rows = offset 0 works transparently.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS _ingest_state "
+        "(file TEXT PRIMARY KEY, offset INTEGER NOT NULL)"
+    )
+    total = 0
+    for jsonl_file in sorted(edir.glob("*.jsonl")):
+        size = jsonl_file.stat().st_size
+        row = conn.execute(
+            "SELECT offset FROM _ingest_state WHERE file = ?",
+            (jsonl_file.name,),
+        ).fetchone()
+        offset = row[0] if row else 0
+        if size < offset:
+            raise _IngestFenceTripped(jsonl_file.name)
+        if size == offset:
+            continue
+        with open(jsonl_file, "rb") as f:
+            f.seek(offset)
+            chunk = f.read(size - offset)
+        last_safe_pos = offset
+        cursor = 0
+        try:
+            while True:
+                nl = chunk.find(b"\n", cursor)
+                if nl < 0:
+                    break  # partial trailing line — leave for next read
+                line_bytes = chunk[cursor:nl]
+                cursor = nl + 1
+                line_end_pos = offset + cursor  # byte position AFTER the \n
+                stripped = line_bytes.strip()
+                if not stripped:
+                    last_safe_pos = line_end_pos
+                    continue
+                try:
+                    entry = json.loads(stripped)
+                except json.JSONDecodeError as e:
+                    print(
+                        f"Warning: {jsonl_file.name}: skipping malformed line: {e}",
+                        file=sys.stderr,
+                    )
+                    last_safe_pos = line_end_pos
+                    continue
+                flat = flatten_entry(entry, schema)
+                upsert_entry(conn, flat, sql, commit=False)
+                total += 1
+                last_safe_pos = line_end_pos
+            conn.execute(
+                "INSERT OR REPLACE INTO _ingest_state (file, offset) VALUES (?, ?)",
+                (jsonl_file.name, last_safe_pos),
+            )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+    return total
+
+
 def ensure_db(notebook_dir: Path, schema: dict | None = None) -> tuple[sqlite3.Connection, dict, SchemaSQL]:
     if schema is None:
         schema = load_schema(notebook_dir)
     sql = build_sql(schema)
     dbp = index_path(notebook_dir)
-    if not dbp.exists() or _index_is_stale(notebook_dir, dbp):
+    if not dbp.exists() or _schema_newer_than_index(notebook_dir, dbp):
         count = _atomic_rebuild(notebook_dir, dbp, schema, sql)
         print(f"Index rebuilt: {count} entries", file=sys.stderr)
+    else:
+        conn = sqlite3.connect(str(dbp))
+        fence_tripped = None
+        new_count = 0
+        try:
+            new_count = incremental_ingest(conn, notebook_dir, schema, sql)
+        except _IngestFenceTripped as e:
+            fence_tripped = str(e)
+        finally:
+            conn.close()
+        if fence_tripped is not None:
+            print(f"Ingest fence tripped on {fence_tripped}; "
+                  f"falling back to full rebuild", file=sys.stderr)
+            count = _atomic_rebuild(notebook_dir, dbp, schema, sql)
+            print(f"Index rebuilt: {count} entries", file=sys.stderr)
+        elif new_count:
+            print(f"Index updated: +{new_count} entries", file=sys.stderr)
     conn = sqlite3.connect(str(dbp))
     return conn, schema, sql
 
 
 def rebuild_from_jsonl(conn: sqlite3.Connection, notebook_dir: Path,
                        schema: dict, sql: SchemaSQL) -> int:
+    """Clear the index and re-ingest every JSONL from byte 0.
+
+    Implemented by clearing entries/entries_fts/_ingest_state and delegating
+    to incremental_ingest. That gets EOF-safe offset bookkeeping for free,
+    so a fresh index ends with _ingest_state populated to current file sizes.
+    """
     edir = entries_dir(notebook_dir)
     if not edir.exists():
         return 0
     conn.execute("DELETE FROM entries")
     conn.execute("DELETE FROM entries_fts")
-    count = 0
-    for jsonl_file in sorted(edir.glob("*.jsonl")):
-        with open(jsonl_file) as f:
-            for lineno, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError as e:
-                    print(f"Warning: {jsonl_file.name}:{lineno}: skipping malformed line: {e}",
-                          file=sys.stderr)
-                    continue
-                flat = flatten_entry(entry, schema)
-                upsert_entry(conn, flat, sql, commit=False)
-                count += 1
+    conn.execute("DELETE FROM _ingest_state")
     conn.commit()
-    return count
+    return incremental_ingest(conn, notebook_dir, schema, sql)
 
 
 def print_table(cursor: sqlite3.Cursor) -> None:
