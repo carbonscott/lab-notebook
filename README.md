@@ -36,8 +36,12 @@ in the same PR.
 To use it locally, symlink it into your skills directory:
 
 ```bash
-ln -s "$(pwd)/skill" ~/.claude/skills/lab-notebook-skill
+ln -sfn "$(pwd)/skill" ~/.claude/skills/lab-notebook-skill
 ```
+
+The install directory name (`lab-notebook-skill`) is independent of the skill's
+internal `name: lnb` in `skill/SKILL.md` — that `name` is what powers the `/lnb`
+command, so the two differing is expected.
 
 The skill calls the `lab-notebook` CLI, so install that first (see above).
 

@@ -1,5 +1,6 @@
 __pycache__/
 .venv/
 uv.lock
+# Agent-workflow scratch dirs (handoff docs, review reports) — not part of the package
 handoffs/
 reports/

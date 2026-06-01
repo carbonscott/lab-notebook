@@ -109,7 +109,9 @@ Wait for them to restart and re-run (or confirm they want the global notebook to
 lab-notebook schema
 ```
 
-If it succeeds, tell them:
+This prints the full schema (unlike the quiet env-check above); that verbosity
+is intentional here — it confirms the notebook is live and shows what fields are
+available. If it succeeds, tell them:
 
 > Project notebook ready. Any `lab-notebook` command in this directory (or subdirectories) will use this notebook.
 
@@ -186,7 +188,8 @@ export LAB_NOTEBOOK_WRITER="<username>"  # optional, defaults to $USER
 lab-notebook schema
 ```
 
-Show the output to the user. If this succeeds, tell them they're ready. If it fails, tell them init may not have completed successfully and suggest re-running `/lnb onboard`.
+This prints the full schema (unlike the quiet env-check in the Environment
+Check); that verbosity is intentional here. Show the output to the user. If this succeeds, tell them they're ready. If it fails, tell them init may not have completed successfully and suggest re-running `/lnb onboard`.
 
 ---
 
@@ -232,7 +235,7 @@ If it is, present the user with options **before** drafting the emit command:
 
 > This seems like a lot for one entry. How would you like to handle it?
 >
-> **A — Reference a file**: Keep the entry concise and attach the details via `--artifacts <path/to/file>`. Best when the bulk is data, code, or output that lives in a file.
+> **A — Reference a file**: Keep the entry concise and attach the details via `--artifacts <path>[,<path>...]` (one or more comma-separated paths). Best when the bulk is data, code, or output that lives in a file.
 >
 > **B — Break it up**: Split into separate `/lnb log` calls — one per distinct insight or decision. Best when there are multiple ideas bundled together.
 >
