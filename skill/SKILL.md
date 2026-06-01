@@ -56,7 +56,7 @@ The index is rebuilt incrementally on read. The first command after new entries 
 
 ## Init
 
-Project-local notebook setup. The CLI creates a `.lnb.env` file in the current directory and a notebook at `.lnb/` (or a custom path). All `lab-notebook` commands then auto-discover it.
+Project-local notebook setup. The CLI creates a `.lnb.env` file in the current directory and a notebook at `.lnb/` (the CLI always creates the `.lnb/` subdirectory inside the path you give, defaulting to the current directory). All `lab-notebook` commands then auto-discover it.
 
 ### Step 1: Pick a notebook path
 
@@ -70,8 +70,8 @@ Ask:
 lab-notebook init [<path>]
 ```
 
-Omit `<path>` to use the default `.lnb/`. The CLI will:
-- Create the notebook directory with `entries/`, `artifacts/`, `schema.yaml`, `.gitignore`
+Omit `<path>` to use the default `./.lnb/`. The CLI always creates a `.lnb/` subdirectory inside the given path, so `<path>` becomes `<path>/.lnb/`. The CLI will:
+- Create the notebook directory (`<path>/.lnb/`) with `entries/`, `artifacts/`, `schema.yaml`, `.gitignore`
 - Write `.lnb.env` in the current directory
 - Warn if `.lnb.env` already exists (overwrites it)
 
