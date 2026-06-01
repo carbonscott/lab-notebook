@@ -125,6 +125,21 @@ file on disk (mutually exclusive with `--template`).
 Write a notebook entry. Required: `--context`, `--type`, content.
 Custom field flags (e.g. `--repo`, `--tags`) are generated from `schema.yaml`.
 
+### `retract ID --reason "why"`
+
+Forget an entry that is wrong or out of date. Both `ID` and `--reason` are
+required. Retract appends a tombstone record to the notebook — it does **not**
+edit or remove the original line. On the next indexed read the target row is
+deleted from `index.sqlite` (and from full-text search); the tombstone itself
+is never returned as an entry.
+
+Because the index is rebuilt from the JSONL, the deletion survives `rebuild`.
+The retraction is logical, not physical: the original entry and the tombstone
+(with its reason) both remain in `entries/*.jsonl` as the audit trail of what
+was forgotten and why. To recover a retracted entry, restore it from a JSONL
+backup and `rebuild` — there is no un-retract command. Any writer may retract
+any entry by id.
+
 ### `sql "query"`
 
 Run raw SQL against the index. Auto-rebuilds if `index.sqlite` is missing.
@@ -184,5 +199,21 @@ Each writer gets their own JSONL file. No merge conflicts.
   "tags": ["mae", "masking"],
   "artifacts": ["research-lrn091:results/S01.csv"],
   "content": "MAE with 75% masking spends most capacity on background."
+}
+```
+
+A `retract` appends a tombstone record instead of an entry. Its `type` is
+`_retract`, `retracts` is the id being forgotten, and `reason` is why. It is a
+control record — it deletes its target from the index and is never indexed as
+an entry itself:
+
+```json
+{
+  "id": "20260322T091500-c3d1",
+  "ts": "2026-03-22T09:15:00",
+  "writer_id": "cong",
+  "type": "_retract",
+  "retracts": "20260321T143022-a7f2",
+  "reason": "superseded by a corrected measurement"
 }
 ```
