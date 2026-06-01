@@ -3,6 +3,7 @@
 Usage:
     lab-notebook init [path] [--template NAME]
     lab-notebook emit --context X --type Y "content"
+    lab-notebook retract ID --reason "why"
     lab-notebook sql "SELECT ..."
     lab-notebook search "query"
     lab-notebook schema
@@ -28,6 +29,7 @@ from pathlib import Path
 import yaml
 
 CORE_FIELDS = ("id", "ts", "writer_id", "context", "type", "content")
+RETRACT_TYPE = "_retract"  # control-record type: tombstones a target entry, never stored as a row
 BUILTIN_FIELDS = {"artifacts": {"type": "list"}}  # always present, nullable; merged into every schema
 VALID_FIELD_TYPES = ("text", "integer", "real", "list")
 TYPE_MAP = {"text": "TEXT", "integer": "INTEGER", "real": "REAL", "list": "TEXT"}
@@ -94,6 +96,10 @@ def load_schema(notebook_dir: Path) -> dict:
         schema = yaml.safe_load(f)
     if not isinstance(schema.get("types"), list) or not schema["types"]:
         print("Error: schema.yaml must have a non-empty 'types' list.", file=sys.stderr)
+        sys.exit(1)
+    if RETRACT_TYPE in schema["types"]:
+        print(f"Error: '{RETRACT_TYPE}' is a reserved control-record type and "
+              f"cannot be declared in schema.yaml.", file=sys.stderr)
         sys.exit(1)
     fields = schema.get("fields") or {}
     schema["fields"] = fields
@@ -299,6 +305,20 @@ def upsert_entry(conn: sqlite3.Connection, entry: dict, sql: SchemaSQL,
         conn.commit()
 
 
+def delete_entry(conn: sqlite3.Connection, target_id: str) -> bool:
+    """Hard-delete a target entry and its FTS row. No-op if it isn't present
+    (already retracted, or the tombstone references an id that never existed).
+    Returns True if a row was actually removed, False on the no-op path."""
+    row = conn.execute(
+        "SELECT rowid FROM entries WHERE id = ?", (target_id,)
+    ).fetchone()
+    if row:
+        conn.execute("DELETE FROM entries_fts WHERE rowid = ?", (row[0],))
+        conn.execute("DELETE FROM entries WHERE id = ?", (target_id,))
+        return True
+    return False
+
+
 def _atomic_rebuild(notebook_dir: Path, dbp: Path,
                      schema: dict, sql: SchemaSQL) -> int:
     """Rebuild the index into a temp file, then atomically rename into place."""
@@ -307,7 +327,10 @@ def _atomic_rebuild(notebook_dir: Path, dbp: Path,
     try:
         conn = sqlite3.connect(tmp)
         conn.executescript(sql.create)
-        count = rebuild_from_jsonl(conn, notebook_dir, schema, sql)
+        rebuild_from_jsonl(conn, notebook_dir, schema, sql)
+        # Report the net active count (rows actually in the index after
+        # tombstones are applied), not the number of lines ingested.
+        count = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
         conn.close()
         os.rename(tmp, str(dbp))
         return count
@@ -326,39 +349,50 @@ class _IngestFenceTripped(Exception):
 
 
 def incremental_ingest(conn: sqlite3.Connection, notebook_dir: Path,
-                       schema: dict, sql: SchemaSQL) -> int:
-    """Per-file byte-offset incremental ingest. Returns count of newly-inserted entries.
+                       schema: dict, sql: SchemaSQL) -> tuple[int, int]:
+    """Per-file byte-offset incremental ingest. Returns (added, retracted): the
+    count of newly-inserted entries and the count of entries actually removed by
+    tombstones in this pass.
 
     Raises _IngestFenceTripped if any JSONL file is smaller than its recorded
     offset (truncation / external rewrite); caller should fall back to full rebuild.
     """
     edir = entries_dir(notebook_dir)
     if not edir.exists():
-        return 0
+        return 0, 0
     # Defensive: an existing pre-_ingest_state index opened by new code reaches
     # this path; create the table so absent rows = offset 0 works transparently.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _ingest_state "
         "(file TEXT PRIMARY KEY, offset INTEGER NOT NULL)"
     )
+    # Two-phase, single-transaction: scan every file first (upserting content
+    # entries and collecting tombstone targets + new offsets), then apply all
+    # deletes and offset writes in one commit. Deferring deletes makes retraction
+    # order-independent — a tombstone may target an entry in a later-sorted file
+    # (any writer can retract any id), and on a full rebuild the target is only
+    # inserted later in the same pass. Committing once keeps the tombstone's
+    # offset advance atomic with its delete, so a crash can't strand a target.
     total = 0
-    for jsonl_file in sorted(edir.glob("*.jsonl")):
-        size = jsonl_file.stat().st_size
-        row = conn.execute(
-            "SELECT offset FROM _ingest_state WHERE file = ?",
-            (jsonl_file.name,),
-        ).fetchone()
-        offset = row[0] if row else 0
-        if size < offset:
-            raise _IngestFenceTripped(jsonl_file.name)
-        if size == offset:
-            continue
-        with open(jsonl_file, "rb") as f:
-            f.seek(offset)
-            chunk = f.read(size - offset)
-        last_safe_pos = offset
-        cursor = 0
-        try:
+    new_offsets: dict[str, int] = {}
+    pending_deletes: list[str] = []
+    try:
+        for jsonl_file in sorted(edir.glob("*.jsonl")):
+            size = jsonl_file.stat().st_size
+            row = conn.execute(
+                "SELECT offset FROM _ingest_state WHERE file = ?",
+                (jsonl_file.name,),
+            ).fetchone()
+            offset = row[0] if row else 0
+            if size < offset:
+                raise _IngestFenceTripped(jsonl_file.name)
+            if size == offset:
+                continue
+            with open(jsonl_file, "rb") as f:
+                f.seek(offset)
+                chunk = f.read(size - offset)
+            last_safe_pos = offset
+            cursor = 0
             while True:
                 nl = chunk.find(b"\n", cursor)
                 if nl < 0:
@@ -379,19 +413,34 @@ def incremental_ingest(conn: sqlite3.Connection, notebook_dir: Path,
                     )
                     last_safe_pos = line_end_pos
                     continue
+                if entry.get("type") == RETRACT_TYPE:
+                    target = entry.get("retracts")
+                    if target:
+                        pending_deletes.append(target)
+                    last_safe_pos = line_end_pos
+                    continue
                 flat = flatten_entry(entry, schema)
                 upsert_entry(conn, flat, sql, commit=False)
                 total += 1
                 last_safe_pos = line_end_pos
+            new_offsets[jsonl_file.name] = last_safe_pos
+        # Deferred-offset safety relies on cmd_retract validating that the target
+        # is already indexed before it writes the tombstone, so a tombstone can
+        # never outrun its target into a later-sorted file and resurrect it.
+        retracted = 0
+        for target in pending_deletes:
+            if delete_entry(conn, target):
+                retracted += 1
+        for name, pos in new_offsets.items():
             conn.execute(
                 "INSERT OR REPLACE INTO _ingest_state (file, offset) VALUES (?, ?)",
-                (jsonl_file.name, last_safe_pos),
+                (name, pos),
             )
-            conn.commit()
-        except BaseException:
-            conn.rollback()
-            raise
-    return total
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return total, retracted
 
 
 def ensure_db(notebook_dir: Path, schema: dict | None = None) -> tuple[sqlite3.Connection, dict, SchemaSQL]:
@@ -405,9 +454,9 @@ def ensure_db(notebook_dir: Path, schema: dict | None = None) -> tuple[sqlite3.C
     else:
         conn = sqlite3.connect(str(dbp))
         fence_tripped = None
-        new_count = 0
+        added = retracted = 0
         try:
-            new_count = incremental_ingest(conn, notebook_dir, schema, sql)
+            added, retracted = incremental_ingest(conn, notebook_dir, schema, sql)
         except _IngestFenceTripped as e:
             fence_tripped = str(e)
         finally:
@@ -417,14 +466,19 @@ def ensure_db(notebook_dir: Path, schema: dict | None = None) -> tuple[sqlite3.C
                   f"falling back to full rebuild", file=sys.stderr)
             count = _atomic_rebuild(notebook_dir, dbp, schema, sql)
             print(f"Index rebuilt: {count} entries", file=sys.stderr)
-        elif new_count:
-            print(f"Index updated: +{new_count} entries", file=sys.stderr)
+        elif added and retracted:
+            print(f"Index updated: +{added} entries, -{retracted} retracted",
+                  file=sys.stderr)
+        elif added:
+            print(f"Index updated: +{added} entries", file=sys.stderr)
+        elif retracted:
+            print(f"Index updated: -{retracted} retracted", file=sys.stderr)
     conn = sqlite3.connect(str(dbp))
     return conn, schema, sql
 
 
 def rebuild_from_jsonl(conn: sqlite3.Connection, notebook_dir: Path,
-                       schema: dict, sql: SchemaSQL) -> int:
+                       schema: dict, sql: SchemaSQL) -> tuple[int, int]:
     """Clear the index and re-ingest every JSONL from byte 0.
 
     Implemented by clearing entries/entries_fts/_ingest_state and delegating
@@ -433,7 +487,7 @@ def rebuild_from_jsonl(conn: sqlite3.Connection, notebook_dir: Path,
     """
     edir = entries_dir(notebook_dir)
     if not edir.exists():
-        return 0
+        return 0, 0
     conn.execute("DELETE FROM entries")
     conn.execute("DELETE FROM entries_fts")
     conn.execute("DELETE FROM _ingest_state")
@@ -653,6 +707,46 @@ def cmd_emit(args: argparse.Namespace) -> None:
     print(f"[{entry['type']}] {entry['id']}  {entry['context']}")
 
 
+def cmd_retract(args: argparse.Namespace) -> None:
+    notebook_dir = get_notebook_dir()
+    writer_id = get_writer_id()
+
+    # Confirm the target exists in the current index. A missing id means it was
+    # never written or has already been retracted — either way, nothing to do.
+    conn, schema, sql = ensure_db(notebook_dir)
+    try:
+        found = conn.execute(
+            "SELECT id FROM entries WHERE id = ?", (args.id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not found:
+        print(f"Error: entry '{args.id}' not found "
+              f"(already retracted or never existed)", file=sys.stderr)
+        sys.exit(1)
+
+    tombstone = {
+        "id": generate_id(),
+        "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "writer_id": writer_id,
+        "type": RETRACT_TYPE,
+        "retracts": args.id,
+        "reason": args.reason,
+    }
+
+    # Append the tombstone to the retracting writer's own file. The deletion is
+    # applied on the next indexed read, the same way emit indexes lazily.
+    edir = entries_dir(notebook_dir)
+    edir.mkdir(exist_ok=True)
+    writer_file = edir / f"{writer_id}.jsonl"
+    with open(writer_file, "a") as f:
+        f.write(json.dumps(tombstone, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+    print(f"[retracted] {args.id}  ({args.reason})")
+
+
 def cmd_sql(args: argparse.Namespace) -> None:
     notebook_dir = get_notebook_dir()
     conn, schema, sql = ensure_db(notebook_dir)
@@ -801,6 +895,15 @@ def main() -> None:
         pass  # schema loading failed — emit will load schema at runtime
 
     p_emit.set_defaults(func=cmd_emit, _schema=_parsed_schema)
+
+    # -- retract --
+    p_retract = sub.add_parser(
+        "retract",
+        help="Retract an entry by id (appends a tombstone; entry stays in JSONL)")
+    p_retract.add_argument("id", help="Id of the entry to retract")
+    p_retract.add_argument("--reason", required=True,
+                           help="Why this entry is being retracted (recorded in the tombstone)")
+    p_retract.set_defaults(func=cmd_retract)
 
     # -- sql --
     p_sql = sub.add_parser("sql", help="Run a SQL query against the index")

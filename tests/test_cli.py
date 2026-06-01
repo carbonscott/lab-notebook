@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from lab_notebook.cli import (
     cmd_emit,
     cmd_init,
     cmd_rebuild,
+    cmd_retract,
     cmd_search,
     cmd_schema,
     cmd_sql,
@@ -1141,3 +1143,198 @@ class TestInitDefault:
         lnb_env = tmp_path / LNB_ENV_FILE
         content = lnb_env.read_text()
         assert str(nb_dir) in content
+
+
+# ---------------------------------------------------------------------------
+# retract
+# ---------------------------------------------------------------------------
+
+
+def make_retract_args(target_id, reason="no longer accurate"):
+    return argparse.Namespace(id=target_id, reason=reason)
+
+
+def _entry_count(notebook):
+    conn, _, _ = ensure_db(notebook)
+    try:
+        return conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _last_id_in_file(notebook, filename):
+    """Return the id of the last record in a writer's JSONL file."""
+    path = entries_dir(notebook) / filename
+    lines = [ln for ln in path.read_text().splitlines() if ln.strip()]
+    return json.loads(lines[-1])["id"]
+
+
+class TestRetract:
+    def test_removes_target_keeps_others(self, notebook):
+        cmd_emit(make_emit_args(content="keep me"))
+        keep_id = _last_id_in_file(notebook, "test-writer.jsonl")
+        cmd_emit(make_emit_args(content="drop me"))
+        drop_id = _last_id_in_file(notebook, "test-writer.jsonl")
+
+        cmd_retract(make_retract_args(drop_id))
+
+        conn, _, _ = ensure_db(notebook)
+        rows = [r[0] for r in conn.execute("SELECT id FROM entries").fetchall()]
+        conn.close()
+        assert keep_id in rows
+        assert drop_id not in rows
+
+    def test_target_gone_from_fts_search(self, notebook, capsys):
+        cmd_emit(make_emit_args(content="unique_token_xyz here"))
+        target = _last_id_in_file(notebook, "test-writer.jsonl")
+        cmd_retract(make_retract_args(target))
+        capsys.readouterr()  # clear
+
+        cmd_search(argparse.Namespace(query="unique_token_xyz", context=None, type=None))
+        out = capsys.readouterr().out
+        assert "unique_token_xyz" not in out
+
+    def test_tombstone_is_not_a_queryable_entry(self, notebook):
+        cmd_emit(make_emit_args(content="solo"))
+        target = _last_id_in_file(notebook, "test-writer.jsonl")
+        cmd_retract(make_retract_args(target))
+
+        conn, _, _ = ensure_db(notebook)
+        try:
+            total = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+            tombstones = conn.execute(
+                "SELECT COUNT(*) FROM entries WHERE type = '_retract'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert total == 0
+        assert tombstones == 0
+
+    def test_tombstone_preserved_in_jsonl(self, notebook):
+        cmd_emit(make_emit_args(content="audit trail"))
+        target = _last_id_in_file(notebook, "test-writer.jsonl")
+        cmd_retract(make_retract_args(target, reason="superseded"))
+
+        lines = [ln for ln in (entries_dir(notebook) / "test-writer.jsonl")
+                 .read_text().splitlines() if ln.strip()]
+        tombstone = json.loads(lines[-1])
+        assert tombstone["type"] == "_retract"
+        assert tombstone["retracts"] == target
+        assert tombstone["reason"] == "superseded"
+
+    def test_reason_is_required(self, notebook, monkeypatch):
+        cmd_emit(make_emit_args(content="needs reason"))
+        target = _last_id_in_file(notebook, "test-writer.jsonl")
+        monkeypatch.setattr("sys.argv", ["lab-notebook", "retract", target])
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code == 2
+
+    def test_nonexistent_id_errors(self, notebook, capsys):
+        with pytest.raises(SystemExit) as exc:
+            cmd_retract(make_retract_args("20990101T000000-dead"))
+        assert exc.value.code == 1
+        assert "not found" in capsys.readouterr().err
+
+    def test_already_retracted_errors(self, notebook):
+        cmd_emit(make_emit_args(content="retract twice"))
+        target = _last_id_in_file(notebook, "test-writer.jsonl")
+        cmd_retract(make_retract_args(target))
+        # First retract is applied on the read inside the second retract.
+        with pytest.raises(SystemExit) as exc:
+            cmd_retract(make_retract_args(target))
+        assert exc.value.code == 1
+
+    def test_cross_writer_retract_survives_rebuild(self, notebook, monkeypatch):
+        # 'zoe' authors the entry; 'amy' retracts it. amy.jsonl sorts before
+        # zoe.jsonl, so on a full rebuild the tombstone is read before the
+        # target is inserted — the deferred two-phase delete must still apply.
+        monkeypatch.setenv("LAB_NOTEBOOK_WRITER", "zoe")
+        cmd_emit(make_emit_args(content="zoe's entry"))
+        target = _last_id_in_file(notebook, "zoe.jsonl")
+
+        monkeypatch.setenv("LAB_NOTEBOOK_WRITER", "amy")
+        cmd_retract(make_retract_args(target))
+
+        cmd_rebuild(argparse.Namespace())
+        assert _entry_count(notebook) == 0
+
+    def test_incremental_path_advances_offset(self, notebook):
+        cmd_emit(make_emit_args(content="incremental"))
+        target = _last_id_in_file(notebook, "test-writer.jsonl")
+        # Build the index first so retract exercises the incremental path.
+        ensure_db(notebook)[0].close()
+
+        cmd_retract(make_retract_args(target))
+        assert _entry_count(notebook) == 0
+
+        wf = entries_dir(notebook) / "test-writer.jsonl"
+        conn = sqlite3.connect(str(index_path(notebook)))
+        try:
+            offset = conn.execute(
+                "SELECT offset FROM _ingest_state WHERE file = ?", (wf.name,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert offset == wf.stat().st_size
+
+    def test_incremental_ingest_missing_entries_dir(self, notebook):
+        # Index built once, then entries/ disappears (deleted, or
+        # LAB_NOTEBOOK_DIR repointed at a dir with only schema.yaml). The
+        # incremental path must return cleanly, not crash on tuple-unpack.
+        cmd_emit(make_emit_args(content="builds the index"))
+        ensure_db(notebook)[0].close()  # build index so next read is incremental
+
+        shutil.rmtree(entries_dir(notebook))  # entries/ gone; index + schema remain
+
+        conn, _, _ = ensure_db(notebook)  # reaches incremental_ingest, edir missing
+        conn.close()  # must not raise TypeError
+
+    def test_rebuild_reports_net_active_count(self, notebook, capsys):
+        cmd_emit(make_emit_args(content="keep"))
+        cmd_emit(make_emit_args(content="drop"))
+        drop_id = _last_id_in_file(notebook, "test-writer.jsonl")
+        cmd_retract(make_retract_args(drop_id))
+        capsys.readouterr()  # clear
+
+        cmd_rebuild(argparse.Namespace())
+        out = capsys.readouterr().out
+        assert "1 entries" in out
+        assert "2 entries" not in out
+
+    def test_reserved_retract_type_rejected(self, notebook, capsys):
+        # A schema may not declare the reserved control-record type; doing so
+        # would let emitted rows be silently swallowed as tombstones.
+        (notebook / "schema.yaml").write_text(
+            "types:\n"
+            "  - observation\n"
+            "  - _retract\n"
+        )
+        with pytest.raises(SystemExit) as exc:
+            load_schema(notebook)
+        assert exc.value.code == 1
+        assert "_retract" in capsys.readouterr().err
+
+    def test_pure_retract_pass_reports_retracted_count(self, notebook, capsys):
+        cmd_emit(make_emit_args(content="to retract"))
+        target = _last_id_in_file(notebook, "test-writer.jsonl")
+        ensure_db(notebook)[0].close()  # build index so retract uses incremental path
+        cmd_retract(make_retract_args(target))  # tombstone applied on next read
+        capsys.readouterr()  # clear
+
+        ensure_db(notebook)[0].close()  # incremental pass applies the tombstone
+        assert "Index updated: -1 retracted" in capsys.readouterr().err
+
+    def test_mixed_add_and_retract_pass_reports_both(self, notebook, capsys):
+        cmd_emit(make_emit_args(content="to retract"))
+        target = _last_id_in_file(notebook, "test-writer.jsonl")
+        ensure_db(notebook)[0].close()  # build index; offset at EOF
+
+        # Stage both a pending tombstone and a pending add for one incremental
+        # pass: retract appends the tombstone unread, then emit appends content.
+        cmd_retract(make_retract_args(target))
+        cmd_emit(make_emit_args(content="brand new"))
+        capsys.readouterr()  # clear
+
+        ensure_db(notebook)[0].close()  # single pass: +1 add, -1 retract
+        assert "Index updated: +1 entries, -1 retracted" in capsys.readouterr().err
