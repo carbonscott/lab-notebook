@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -1276,6 +1277,18 @@ class TestRetract:
         finally:
             conn.close()
         assert offset == wf.stat().st_size
+
+    def test_incremental_ingest_missing_entries_dir(self, notebook):
+        # Index built once, then entries/ disappears (deleted, or
+        # LAB_NOTEBOOK_DIR repointed at a dir with only schema.yaml). The
+        # incremental path must return cleanly, not crash on tuple-unpack.
+        cmd_emit(make_emit_args(content="builds the index"))
+        ensure_db(notebook)[0].close()  # build index so next read is incremental
+
+        shutil.rmtree(entries_dir(notebook))  # entries/ gone; index + schema remain
+
+        conn, _, _ = ensure_db(notebook)  # reaches incremental_ingest, edir missing
+        conn.close()  # must not raise TypeError
 
     def test_rebuild_reports_net_active_count(self, notebook, capsys):
         cmd_emit(make_emit_args(content="keep"))

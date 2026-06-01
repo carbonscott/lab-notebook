@@ -359,7 +359,7 @@ def incremental_ingest(conn: sqlite3.Connection, notebook_dir: Path,
     """
     edir = entries_dir(notebook_dir)
     if not edir.exists():
-        return 0
+        return 0, 0
     # Defensive: an existing pre-_ingest_state index opened by new code reaches
     # this path; create the table so absent rows = offset 0 works transparently.
     conn.execute(
