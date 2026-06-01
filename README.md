@@ -24,6 +24,23 @@ To update after code changes:
 uv tool install --force git+https://github.com/carbonscott/lab-notebook
 ```
 
+## Claude Code skill
+
+This repo ships the Claude Code skill that powers the `/lnb` slash command at
+[`skill/SKILL.md`](skill/SKILL.md). It wraps the CLI with guided flows for
+logging, recalling, and retracting entries. The skill is the agent-facing
+surface of this CLI and is kept in sync with it here (rather than in a separate
+repo), so a change to the CLI's command surface should update `skill/SKILL.md`
+in the same PR.
+
+To use it locally, symlink it into your skills directory:
+
+```bash
+ln -s "$(pwd)/skill" ~/.claude/skills/lab-notebook-skill
+```
+
+The skill calls the `lab-notebook` CLI, so install that first (see above).
+
 ## Quick Start
 
 ```bash
