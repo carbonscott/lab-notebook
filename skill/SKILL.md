@@ -403,9 +403,7 @@ lab-notebook init "$LAB_NOTEBOOK_DIR" --template ml-experiment-log
 lab-notebook init --template-path ./my-schema.yaml
 ```
 
-Bundled templates:
-- `research-notebook` (default) — observations, decisions, dead-ends, questions, milestones
-- `ml-experiment-log` — run-start, run-end, config-change, crash, checkpoint, comparison
+Run `lab-notebook template` (shown above) to see the bundled templates; the list is generated from the schemas the installed package ships, so it's always current.
 
 Use `--template-path` when your project ships its own schema file rather than relying on a bundled template. Mutually exclusive with `--template`.
 
