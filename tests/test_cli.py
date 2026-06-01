@@ -1288,3 +1288,40 @@ class TestRetract:
         out = capsys.readouterr().out
         assert "1 entries" in out
         assert "2 entries" not in out
+
+    def test_reserved_retract_type_rejected(self, notebook, capsys):
+        # A schema may not declare the reserved control-record type; doing so
+        # would let emitted rows be silently swallowed as tombstones.
+        (notebook / "schema.yaml").write_text(
+            "types:\n"
+            "  - observation\n"
+            "  - _retract\n"
+        )
+        with pytest.raises(SystemExit) as exc:
+            load_schema(notebook)
+        assert exc.value.code == 1
+        assert "_retract" in capsys.readouterr().err
+
+    def test_pure_retract_pass_reports_retracted_count(self, notebook, capsys):
+        cmd_emit(make_emit_args(content="to retract"))
+        target = _last_id_in_file(notebook, "test-writer.jsonl")
+        ensure_db(notebook)[0].close()  # build index so retract uses incremental path
+        cmd_retract(make_retract_args(target))  # tombstone applied on next read
+        capsys.readouterr()  # clear
+
+        ensure_db(notebook)[0].close()  # incremental pass applies the tombstone
+        assert "Index updated: -1 retracted" in capsys.readouterr().err
+
+    def test_mixed_add_and_retract_pass_reports_both(self, notebook, capsys):
+        cmd_emit(make_emit_args(content="to retract"))
+        target = _last_id_in_file(notebook, "test-writer.jsonl")
+        ensure_db(notebook)[0].close()  # build index; offset at EOF
+
+        # Stage both a pending tombstone and a pending add for one incremental
+        # pass: retract appends the tombstone unread, then emit appends content.
+        cmd_retract(make_retract_args(target))
+        cmd_emit(make_emit_args(content="brand new"))
+        capsys.readouterr()  # clear
+
+        ensure_db(notebook)[0].close()  # single pass: +1 add, -1 retract
+        assert "Index updated: +1 entries, -1 retracted" in capsys.readouterr().err

@@ -97,6 +97,10 @@ def load_schema(notebook_dir: Path) -> dict:
     if not isinstance(schema.get("types"), list) or not schema["types"]:
         print("Error: schema.yaml must have a non-empty 'types' list.", file=sys.stderr)
         sys.exit(1)
+    if RETRACT_TYPE in schema["types"]:
+        print(f"Error: '{RETRACT_TYPE}' is a reserved control-record type and "
+              f"cannot be declared in schema.yaml.", file=sys.stderr)
+        sys.exit(1)
     fields = schema.get("fields") or {}
     schema["fields"] = fields
     reserved = set(CORE_FIELDS) | {"extra"}
@@ -301,15 +305,18 @@ def upsert_entry(conn: sqlite3.Connection, entry: dict, sql: SchemaSQL,
         conn.commit()
 
 
-def delete_entry(conn: sqlite3.Connection, target_id: str) -> None:
+def delete_entry(conn: sqlite3.Connection, target_id: str) -> bool:
     """Hard-delete a target entry and its FTS row. No-op if it isn't present
-    (already retracted, or the tombstone references an id that never existed)."""
+    (already retracted, or the tombstone references an id that never existed).
+    Returns True if a row was actually removed, False on the no-op path."""
     row = conn.execute(
         "SELECT rowid FROM entries WHERE id = ?", (target_id,)
     ).fetchone()
     if row:
         conn.execute("DELETE FROM entries_fts WHERE rowid = ?", (row[0],))
         conn.execute("DELETE FROM entries WHERE id = ?", (target_id,))
+        return True
+    return False
 
 
 def _atomic_rebuild(notebook_dir: Path, dbp: Path,
@@ -342,8 +349,10 @@ class _IngestFenceTripped(Exception):
 
 
 def incremental_ingest(conn: sqlite3.Connection, notebook_dir: Path,
-                       schema: dict, sql: SchemaSQL) -> int:
-    """Per-file byte-offset incremental ingest. Returns count of newly-inserted entries.
+                       schema: dict, sql: SchemaSQL) -> tuple[int, int]:
+    """Per-file byte-offset incremental ingest. Returns (added, retracted): the
+    count of newly-inserted entries and the count of entries actually removed by
+    tombstones in this pass.
 
     Raises _IngestFenceTripped if any JSONL file is smaller than its recorded
     offset (truncation / external rewrite); caller should fall back to full rebuild.
@@ -415,8 +424,13 @@ def incremental_ingest(conn: sqlite3.Connection, notebook_dir: Path,
                 total += 1
                 last_safe_pos = line_end_pos
             new_offsets[jsonl_file.name] = last_safe_pos
+        # Deferred-offset safety relies on cmd_retract validating that the target
+        # is already indexed before it writes the tombstone, so a tombstone can
+        # never outrun its target into a later-sorted file and resurrect it.
+        retracted = 0
         for target in pending_deletes:
-            delete_entry(conn, target)
+            if delete_entry(conn, target):
+                retracted += 1
         for name, pos in new_offsets.items():
             conn.execute(
                 "INSERT OR REPLACE INTO _ingest_state (file, offset) VALUES (?, ?)",
@@ -426,7 +440,7 @@ def incremental_ingest(conn: sqlite3.Connection, notebook_dir: Path,
     except BaseException:
         conn.rollback()
         raise
-    return total
+    return total, retracted
 
 
 def ensure_db(notebook_dir: Path, schema: dict | None = None) -> tuple[sqlite3.Connection, dict, SchemaSQL]:
@@ -440,9 +454,9 @@ def ensure_db(notebook_dir: Path, schema: dict | None = None) -> tuple[sqlite3.C
     else:
         conn = sqlite3.connect(str(dbp))
         fence_tripped = None
-        new_count = 0
+        added = retracted = 0
         try:
-            new_count = incremental_ingest(conn, notebook_dir, schema, sql)
+            added, retracted = incremental_ingest(conn, notebook_dir, schema, sql)
         except _IngestFenceTripped as e:
             fence_tripped = str(e)
         finally:
@@ -452,14 +466,19 @@ def ensure_db(notebook_dir: Path, schema: dict | None = None) -> tuple[sqlite3.C
                   f"falling back to full rebuild", file=sys.stderr)
             count = _atomic_rebuild(notebook_dir, dbp, schema, sql)
             print(f"Index rebuilt: {count} entries", file=sys.stderr)
-        elif new_count:
-            print(f"Index updated: +{new_count} entries", file=sys.stderr)
+        elif added and retracted:
+            print(f"Index updated: +{added} entries, -{retracted} retracted",
+                  file=sys.stderr)
+        elif added:
+            print(f"Index updated: +{added} entries", file=sys.stderr)
+        elif retracted:
+            print(f"Index updated: -{retracted} retracted", file=sys.stderr)
     conn = sqlite3.connect(str(dbp))
     return conn, schema, sql
 
 
 def rebuild_from_jsonl(conn: sqlite3.Connection, notebook_dir: Path,
-                       schema: dict, sql: SchemaSQL) -> int:
+                       schema: dict, sql: SchemaSQL) -> tuple[int, int]:
     """Clear the index and re-ingest every JSONL from byte 0.
 
     Implemented by clearing entries/entries_fts/_ingest_state and delegating
@@ -468,7 +487,7 @@ def rebuild_from_jsonl(conn: sqlite3.Connection, notebook_dir: Path,
     """
     edir = entries_dir(notebook_dir)
     if not edir.exists():
-        return 0
+        return 0, 0
     conn.execute("DELETE FROM entries")
     conn.execute("DELETE FROM entries_fts")
     conn.execute("DELETE FROM _ingest_state")
