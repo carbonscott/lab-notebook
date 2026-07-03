@@ -22,6 +22,7 @@ from lab_notebook.schema import (
 )
 from lab_notebook.store import (
     LNB_ENV_FILE,
+    Notebook,
     _find_lnb_env,
     _parse_lnb_env,
     ensure_db,
@@ -245,7 +246,7 @@ class TestSchema:
         cmd_emit(make_custom_emit_args(type="result", content="A result"))
         # Should work: 'result' is in custom types
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(LnbError):
             cmd_emit(make_custom_emit_args(type="milestone", content="Not allowed"))
         # 'milestone' is not in the custom schema's types list
 
@@ -306,7 +307,7 @@ class TestEmit:
         assert rows[0][0] == "First entry"
 
     def test_type_validation(self, notebook):
-        with pytest.raises(SystemExit):
+        with pytest.raises(LnbError):
             cmd_emit(make_emit_args(type="invalid-type"))
 
     def test_tags_and_artifacts(self, notebook):
@@ -406,19 +407,19 @@ class TestEmit:
         assert extra["num"] == "42"
 
     def test_extra_rejects_schema_field_collision(self, notebook):
-        with pytest.raises(SystemExit):
+        with pytest.raises(LnbError):
             cmd_emit(make_emit_args(extra=["repo=sneaky"], content="Should fail"))
 
     def test_extra_rejects_core_field_collision(self, notebook):
-        with pytest.raises(SystemExit):
+        with pytest.raises(LnbError):
             cmd_emit(make_emit_args(extra=["context=sneaky"], content="Should fail"))
 
     def test_extra_rejects_builtin_field_collision(self, notebook):
-        with pytest.raises(SystemExit):
+        with pytest.raises(LnbError):
             cmd_emit(make_emit_args(extra=["artifacts=sneaky"], content="Should fail"))
 
     def test_extra_rejects_custom_schema_field_collision(self, custom_notebook):
-        with pytest.raises(SystemExit):
+        with pytest.raises(LnbError):
             cmd_emit(make_custom_emit_args(extra=["dataset=sneaky"], content="Should fail"))
 
     def test_extra_with_equals_in_value(self, notebook):
@@ -450,7 +451,7 @@ class TestSql:
         assert "no results" in out
 
     def test_invalid_sql(self, notebook):
-        with pytest.raises(SystemExit):
+        with pytest.raises(LnbError):
             cmd_sql(argparse.Namespace(query="NOT VALID SQL"))
 
     def test_query_custom_field(self, custom_notebook, capsys):
@@ -1261,20 +1262,18 @@ class TestRetract:
             main()
         assert exc.value.code == 2
 
-    def test_nonexistent_id_errors(self, notebook, capsys):
-        with pytest.raises(SystemExit) as exc:
+    def test_nonexistent_id_errors(self, notebook):
+        with pytest.raises(LnbError) as exc:
             cmd_retract(make_retract_args("20990101T000000-dead"))
-        assert exc.value.code == 1
-        assert "not found" in capsys.readouterr().err
+        assert "not found" in str(exc.value)
 
     def test_already_retracted_errors(self, notebook):
         cmd_emit(make_emit_args(content="retract twice"))
         target = _last_id_in_file(notebook, "test-writer.jsonl")
         cmd_retract(make_retract_args(target))
         # First retract is applied on the read inside the second retract.
-        with pytest.raises(SystemExit) as exc:
+        with pytest.raises(LnbError):
             cmd_retract(make_retract_args(target))
-        assert exc.value.code == 1
 
     def test_cross_writer_retract_survives_rebuild(self, notebook, monkeypatch):
         # 'zoe' authors the entry; 'amy' retracts it. amy.jsonl sorts before
@@ -1368,3 +1367,64 @@ class TestRetract:
 
         ensure_db(notebook)[0].close()  # single pass: +1 add, -1 retract
         assert "Index updated: +1 entries, -1 retracted" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Notebook API (no argparse)
+# ---------------------------------------------------------------------------
+
+
+class TestNotebookApi:
+    """Exercise the store.Notebook class directly, bypassing the CLI entirely."""
+
+    def test_emit_query_retract_roundtrip(self, notebook):
+        nb = Notebook(notebook)
+
+        # emit returns the entry dict with fields coerced by Notebook.emit
+        entry = nb.emit(
+            "api/ctx",
+            "observation",
+            "direct api entry",
+            fields={"repo": "lab", "tags": "alpha, beta"},
+            extra={"custom": "x"},
+        )
+        assert entry["content"] == "direct api entry"
+        assert entry["context"] == "api/ctx"
+        assert entry["repo"] == "lab"
+        assert entry["tags"] == ["alpha", "beta"]   # list field split from string
+        assert entry["custom"] == "x"               # extra field carried through
+        target_id = entry["id"]
+
+        # query sees the freshly-emitted entry (index built on demand)
+        cur = nb.query(
+            "SELECT content, repo FROM entries WHERE id = ?", (target_id,)
+        )
+        rows = cur.fetchall()
+        assert rows == [("direct api entry", "lab")]
+
+        # retract appends a tombstone targeting the entry
+        tomb = nb.retract(target_id, "no longer accurate")
+        assert tomb["type"] == "_retract"
+        assert tomb["retracts"] == target_id
+
+        # query again: the entry is gone (tombstone applied on the next read)
+        cur = nb.query("SELECT id FROM entries WHERE id = ?", (target_id,))
+        assert cur.fetchall() == []
+        nb.close()
+
+    def test_emit_rejects_unknown_type(self, notebook):
+        nb = Notebook(notebook)
+        with pytest.raises(LnbError):
+            nb.emit("api/ctx", "not-a-type", "content")
+        nb.close()
+
+    def test_retract_missing_target_raises(self, notebook):
+        nb = Notebook(notebook)
+        with pytest.raises(LnbError) as exc:
+            nb.retract("20990101T000000-dead", "reason")
+        assert "not found" in str(exc.value)
+        nb.close()
+
+    def test_init_missing_schema_raises(self, tmp_path):
+        with pytest.raises(LnbError):
+            Notebook(tmp_path)
