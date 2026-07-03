@@ -13,7 +13,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from .schema import CORE_FIELDS, RETRACT_TYPE, SchemaSQL, build_sql, load_schema
+from .schema import CORE_FIELDS, RETRACT_TYPE, LnbError, SchemaSQL, build_sql, load_schema
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -65,14 +65,13 @@ def get_notebook_dir(hint: str = "") -> Path:
         if val:
             return Path(val)
     # 3. Error
-    print("Error: LAB_NOTEBOOK_DIR is not set and no .lnb.env found.", file=sys.stderr)
+    msg = "Error: LAB_NOTEBOOK_DIR is not set and no .lnb.env found."
     if hint:
-        print(hint, file=sys.stderr)
+        msg += "\n" + hint
     else:
-        print("Set $LAB_NOTEBOOK_DIR, or run 'lab-notebook init' to create\n"
-              "a project-local notebook (writes .lnb.env in the current directory).",
-              file=sys.stderr)
-    sys.exit(1)
+        msg += ("\nSet $LAB_NOTEBOOK_DIR, or run 'lab-notebook init' to create\n"
+                "a project-local notebook (writes .lnb.env in the current directory).")
+    raise LnbError(msg)
 
 
 def get_writer_id() -> str:

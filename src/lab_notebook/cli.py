@@ -27,6 +27,7 @@ from .schema import (
     CORE_FIELDS,
     DEFAULT_TEMPLATE,
     RETRACT_TYPE,
+    LnbError,
     build_sql,
     format_schema_help,
     load_schema,
@@ -443,7 +444,11 @@ def main() -> None:
     p_template.set_defaults(func=cmd_template)
 
     args = parser.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except LnbError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
