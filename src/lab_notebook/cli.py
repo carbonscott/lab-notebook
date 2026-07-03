@@ -86,7 +86,18 @@ def cmd_init(args: argparse.Namespace) -> None:
         print_templates()
         return
 
-    target = (Path(args.path or ".") / ".lnb").resolve()
+    # Refuse to clobber an existing .lnb.env unless --force (matches the
+    # `template` command's convention). Checked up front so we fail before
+    # creating any notebook directory.
+    lnb_env = Path.cwd() / LNB_ENV_FILE
+    if lnb_env.exists() and not getattr(args, "force", False):
+        raise LnbError(
+            f"Error: {lnb_env} already exists. Use --force to overwrite."
+        )
+
+    # Literal path semantics: no arg -> ./.lnb; an explicit path is used as-is
+    # (no .lnb appended).
+    target = (Path(".") / ".lnb" if args.path is None else Path(args.path)).resolve()
     target.mkdir(parents=True, exist_ok=True)
 
     template_path = getattr(args, "template_path", None)
@@ -128,10 +139,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     writer = os.environ.get("USER", "unknown")
 
-    # Write .lnb.env in CWD
-    lnb_env = Path.cwd() / LNB_ENV_FILE
-    if lnb_env.exists():
-        print(f"Warning: overwriting existing {lnb_env}", file=sys.stderr)
+    # Write .lnb.env in CWD (existence guarded above; --force overwrites).
     lnb_env.write_text(
         f"# Project-local lab-notebook configuration\n"
         f"export LAB_NOTEBOOK_DIR={target}\n"
@@ -289,6 +297,8 @@ def main() -> None:
                         help="Bundled schema template (omit value to list available templates)")
     tgroup.add_argument("--template-path", default=None, metavar="PATH",
                         help="Load schema from a YAML file on disk")
+    p_init.add_argument("--force", action="store_true",
+                        help="Overwrite an existing .lnb.env in the current directory")
     p_init.set_defaults(func=cmd_init)
 
     # -- emit --
