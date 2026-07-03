@@ -227,7 +227,7 @@ Each writer gets their own JSONL file. No merge conflicts.
 ```json
 {
   "id": "20260321T143022-a7f2c3d1",
-  "ts": "2026-03-21T14:30:22",
+  "ts": "2026-03-21T14:30:22-07:00",
   "writer_id": "cong",
   "context": "maxie/ssl-comparison",
   "type": "observation",
@@ -239,6 +239,16 @@ Each writer gets their own JSONL file. No merge conflicts.
 }
 ```
 
+`ts` is an ISO 8601 timestamp in the writer's local time with an explicit UTC
+offset (`datetime.now().astimezone().isoformat(timespec="seconds")`), e.g.
+`2026-03-21T14:30:22-07:00`. It is stored as TEXT and `ORDER BY ts` sorts
+lexically. Entries written before this format carried a naive timestamp with no
+offset (`2026-03-21T14:30:22`); their date/time prefix still sorts correctly
+against the newer values, so day-level ordering within one machine's history is
+reliable. Cross-timezone ordering of those legacy naive entries is best-effort,
+since a naive value has no offset to normalize against. Entry `id`s keep their
+compact naive form (`YYYYMMDDThhmmss-<hex>`) and are unaffected.
+
 A `retract` appends a tombstone record instead of an entry. Its `type` is
 `_retract`, `retracts` is the id being forgotten, and `reason` is why. It is a
 control record — it deletes its target from the index and is never indexed as
@@ -247,7 +257,7 @@ an entry itself:
 ```json
 {
   "id": "20260322T091500-c3d19f4e",
-  "ts": "2026-03-22T09:15:00",
+  "ts": "2026-03-22T09:15:00-07:00",
   "writer_id": "cong",
   "type": "_retract",
   "retracts": "20260321T143022-a7f2c3d1",
