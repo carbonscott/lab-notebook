@@ -381,7 +381,7 @@ class Notebook:
 
         entry = {
             "id": generate_id(),
-            "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
             "writer_id": self.writer_id,
             "context": context,
             "type": type,
@@ -459,7 +459,7 @@ class Notebook:
 
         tombstone = {
             "id": generate_id(),
-            "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
             "writer_id": self.writer_id,
             "type": RETRACT_TYPE,
             "retracts": target_id,

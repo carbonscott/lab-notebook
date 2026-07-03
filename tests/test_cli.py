@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -735,6 +736,72 @@ class TestEntryId:
         finally:
             conn.close()
         assert old_id not in rows
+
+
+# ---------------------------------------------------------------------------
+# timestamps
+# ---------------------------------------------------------------------------
+
+
+class TestTimestamp:
+    def test_emit_ts_is_timezone_aware(self, notebook):
+        # New entries carry an offset-bearing ISO 8601 ts, e.g.
+        # 2026-06-10T14:30:22-07:00.
+        cmd_emit(make_emit_args(content="tz-aware entry"))
+        conn, _, _ = ensure_db(notebook)
+        try:
+            ts = conn.execute(
+                "SELECT ts FROM entries WHERE content = ?", ("tz-aware entry",)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}", ts
+        ), ts
+        # Round-trips through fromisoformat and is genuinely offset-aware.
+        assert datetime.fromisoformat(ts).tzinfo is not None
+
+    def test_order_by_ts_mixes_legacy_naive_and_aware(self, notebook):
+        # Legacy entries carry a naive ts (no offset); new ones carry an
+        # offset-aware ts. Both share the YYYY-MM-DDThh:mm:ss prefix, so a
+        # lexical ORDER BY ts still yields correct day-level ordering when the
+        # two formats are interleaved in one JSONL.
+        writer_file = entries_dir(notebook) / "mixed-writer.jsonl"
+        rows = [
+            ("20260315T143022-aaaa1111", "2026-03-15T14:30:22-07:00", "march aware"),
+            ("20260101T080000-bbbb2222", "2026-01-01T08:00:00", "january naive"),
+            ("20260520T091500-cccc3333", "2026-05-20T09:15:00+02:00", "may aware"),
+            ("20260210T235959-dddd4444", "2026-02-10T23:59:59", "february naive"),
+        ]
+        lines = [
+            json.dumps({
+                "id": entry_id,
+                "ts": ts,
+                "writer_id": "mixed-writer",
+                "context": "mixed/ctx",
+                "type": "observation",
+                "content": content,
+            })
+            for entry_id, ts, content in rows
+        ]
+        writer_file.write_text("\n".join(lines) + "\n")
+
+        conn, _, _ = ensure_db(notebook)
+        try:
+            got = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT content FROM entries ORDER BY ts"
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+        assert got == [
+            "january naive",
+            "february naive",
+            "march aware",
+            "may aware",
+        ]
 
 
 # ---------------------------------------------------------------------------
