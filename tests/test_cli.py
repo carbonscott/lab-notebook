@@ -10,10 +10,26 @@ from pathlib import Path
 
 import pytest
 
-from lab_notebook.cli import (
+from lab_notebook.schema import (
+    build_sql,
+    get_template_path,
+    list_templates,
+    load_schema,
+    print_templates,
+    read_template,
+    read_template_from_path,
+)
+from lab_notebook.store import (
     LNB_ENV_FILE,
     _find_lnb_env,
     _parse_lnb_env,
+    ensure_db,
+    entries_dir,
+    flatten_entry,
+    get_notebook_dir,
+    index_path,
+)
+from lab_notebook.cli import (
     cmd_contexts,
     cmd_emit,
     cmd_init,
@@ -23,19 +39,7 @@ from lab_notebook.cli import (
     cmd_schema,
     cmd_sql,
     cmd_template,
-    ensure_db,
-    entries_dir,
-    get_notebook_dir,
-    get_template_path,
-    index_path,
-    list_templates,
-    load_schema,
-    build_sql,
-    flatten_entry,
     main,
-    print_templates,
-    read_template,
-    read_template_from_path,
 )
 
 
