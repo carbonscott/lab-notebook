@@ -4,6 +4,7 @@ Usage:
     lab-notebook init [path] [--template NAME]
     lab-notebook emit --context X --type Y "content"
     lab-notebook retract ID --reason "why"
+    lab-notebook show ID
     lab-notebook sql "SELECT ..."
     lab-notebook search "query"
     lab-notebook schema
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import sqlite3
 import sys
@@ -194,6 +196,26 @@ def cmd_retract(args: argparse.Namespace) -> None:
     print(f"[retracted] {args.id}  ({args.reason})")
 
 
+def cmd_show(args: argparse.Namespace) -> None:
+    nb = Notebook(get_notebook_dir())
+    try:
+        entry = nb.get(args.id)
+    finally:
+        nb.close()
+
+    # `extra` is stored as a JSON blob; decode it so its keys print like any
+    # other field. Core and schema columns print first (in table order), then
+    # the decoded --extra keys. None values render as blank.
+    raw_extra = entry.pop("extra", None)
+    extra = json.loads(raw_extra) if raw_extra else {}
+
+    width = max((len(k) for k in list(entry) + list(extra)), default=1)
+    for key, val in entry.items():
+        print(f"{key:<{width}}  {'' if val is None else val}")
+    for key, val in extra.items():
+        print(f"{key:<{width}}  {val}")
+
+
 def cmd_sql(args: argparse.Namespace) -> None:
     nb = Notebook(get_notebook_dir())
     try:
@@ -328,6 +350,11 @@ def main() -> None:
     p_retract.add_argument("--reason", required=True,
                            help="Why this entry is being retracted (recorded in the tombstone)")
     p_retract.set_defaults(func=cmd_retract)
+
+    # -- show --
+    p_show = sub.add_parser("show", help="Print one entry in full by id")
+    p_show.add_argument("id", help="Id of the entry to show")
+    p_show.set_defaults(func=cmd_show)
 
     # -- sql --
     p_sql = sub.add_parser("sql", help="Run a SQL query against the index")

@@ -169,6 +169,14 @@ was forgotten and why. To recover a retracted entry, restore it from a JSONL
 backup and `rebuild` — there is no un-retract command. Any writer may retract
 any entry by id.
 
+### `show ID`
+
+Print one entry in full by id — every core and schema field plus any `--extra`
+values (decoded from their JSON blob) — in a readable key/value layout. Empty
+fields render blank. Errors if the id is not in the index (retracted or never
+existed). Use it after a scan query (`SELECT id, ...`) when a truncated preview
+isn't enough.
+
 ### `sql "query"`
 
 Run raw SQL against the index. Auto-rebuilds if `index.sqlite` is missing.

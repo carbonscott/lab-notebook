@@ -477,6 +477,24 @@ class Notebook:
         self._conn, _, _ = ensure_db(self.dir, self.schema)
         return self._conn.execute(sql, params)
 
+    def get(self, entry_id: str) -> dict:
+        """Return one entry as an ordered ``{column: value}`` dict, or raise
+        LnbError if the id is not in the index (retracted or never existed).
+
+        Column order follows the table definition — core fields, then schema
+        fields, then the raw ``extra`` JSON blob — which callers decode for
+        display.
+        """
+        cursor = self.query("SELECT * FROM entries WHERE id = ?", (entry_id,))
+        row = cursor.fetchone()
+        if row is None:
+            raise LnbError(
+                f"Error: entry '{entry_id}' not found "
+                f"(retracted or never existed)"
+            )
+        cols = [d[0] for d in cursor.description]
+        return dict(zip(cols, row))
+
     def close(self) -> None:
         if self._conn is not None:
             self._conn.close()
