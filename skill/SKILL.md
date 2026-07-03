@@ -330,7 +330,7 @@ SQL queries use `substr(content,1,80)` by default for scanning. If the truncated
 ```bash
 lab-notebook sql \
   "SELECT id, type, substr(content,1,80) FROM entries WHERE type='dead-end' ORDER BY ts DESC"
-lab-notebook show 20260321T143022-a7f2
+lab-notebook show 20260321T143022-a7f2c3d1
 ```
 
 **If results are empty**, suggest recovery:
