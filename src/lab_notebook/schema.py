@@ -22,7 +22,14 @@ BUILTIN_FIELDS = {"artifacts": {"type": "list"}}  # always present, nullable; me
 VALID_FIELD_TYPES = ("text", "integer", "real", "list")
 TYPE_MAP = {"text": "TEXT", "integer": "INTEGER", "real": "REAL", "list": "TEXT"}
 
-SchemaSQL = namedtuple("SchemaSQL", ["create", "upsert", "fts_insert", "fts_cols"])
+# Index layout version, stamped into the SQLite index via PRAGMA user_version.
+# ensure_db forces a full rebuild when an existing index's version differs, so
+# bumping this transparently migrates old indexes (they are disposable).
+#   1 = standalone entries_fts, manual sync in upsert_entry/delete_entry
+#   2 = external-content entries_fts kept in sync by triggers (US-004)
+INDEX_USER_VERSION = 2
+
+SchemaSQL = namedtuple("SchemaSQL", ["create", "upsert", "fts_cols"])
 
 
 def format_schema_help(schema: dict) -> str:
@@ -108,18 +115,45 @@ def build_sql(schema: dict) -> SchemaSQL:
         if spec.get("fts"):
             fts_cols.append(name)
 
+    # entries_fts is an external-content FTS5 table: it stores no copy of the
+    # text itself, only the inverted index, and reads column values back from
+    # `entries` by rowid. Triggers keep the index in sync — AFTER INSERT adds
+    # postings, AFTER DELETE removes them via the fts5 'delete' command (which
+    # needs the *old* column values to locate the tokens), and AFTER UPDATE
+    # does both. INSERT OR REPLACE in upsert_entry fires delete+insert; a plain
+    # DELETE in delete_entry fires the delete trigger. (For REPLACE's implicit
+    # delete to fire its trigger, the ingest connection must run with
+    # PRAGMA recursive_triggers = ON — see store.py.)
+    fts_col_list = ", ".join(f'"{c}"' for c in fts_cols)
+    new_vals = ", ".join(f'new."{c}"' for c in fts_cols)
+    old_vals = ", ".join(f'old."{c}"' for c in fts_cols)
+
     create_sql = (
         f"CREATE TABLE IF NOT EXISTS entries (\n    "
         + ",\n    ".join(col_defs)
         + "\n);\n"
         + "CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5("
-        + ", ".join(f'"{c}"' for c in fts_cols)
-        + ");\n"
+        + f"{fts_col_list}, content='entries', content_rowid='rowid');\n"
+        + "CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN\n"
+        + f"    INSERT INTO entries_fts(rowid, {fts_col_list}) "
+        + f"VALUES (new.rowid, {new_vals});\n"
+        + "END;\n"
+        + "CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN\n"
+        + f"    INSERT INTO entries_fts(entries_fts, rowid, {fts_col_list}) "
+        + f"VALUES ('delete', old.rowid, {old_vals});\n"
+        + "END;\n"
+        + "CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN\n"
+        + f"    INSERT INTO entries_fts(entries_fts, rowid, {fts_col_list}) "
+        + f"VALUES ('delete', old.rowid, {old_vals});\n"
+        + f"    INSERT INTO entries_fts(rowid, {fts_col_list}) "
+        + f"VALUES (new.rowid, {new_vals});\n"
+        + "END;\n"
         + "CREATE INDEX IF NOT EXISTS idx_entries_context ON entries(context);\n"
         + "CREATE INDEX IF NOT EXISTS idx_entries_type ON entries(type);\n"
         + "CREATE INDEX IF NOT EXISTS idx_entries_ts ON entries(ts);\n"
         + "CREATE TABLE IF NOT EXISTS _ingest_state ("
         + "file TEXT PRIMARY KEY, offset INTEGER NOT NULL);\n"
+        + f"PRAGMA user_version = {INDEX_USER_VERSION};\n"
     )
 
     # -- UPSERT --
@@ -133,16 +167,7 @@ def build_sql(schema: dict) -> SchemaSQL:
         f"    ({placeholders});\n"
     )
 
-    # -- FTS INSERT --
-    quoted_fts = ", ".join(f'"{c}"' for c in fts_cols)
-    fts_placeholders = ", ".join(f":{c}" for c in fts_cols)
-    fts_insert_sql = (
-        f"INSERT INTO entries_fts (rowid, {quoted_fts})\n"
-        f"VALUES (:rowid, {fts_placeholders});\n"
-    )
-
-    return SchemaSQL(create=create_sql, upsert=upsert_sql,
-                     fts_insert=fts_insert_sql, fts_cols=fts_cols)
+    return SchemaSQL(create=create_sql, upsert=upsert_sql, fts_cols=fts_cols)
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from lab_notebook.schema import (
+    INDEX_USER_VERSION,
     LnbError,
     build_sql,
     get_template_path,
@@ -24,6 +25,7 @@ from lab_notebook.store import (
     LNB_ENV_FILE,
     Notebook,
     _find_lnb_env,
+    _index_user_version,
     _parse_lnb_env,
     ensure_db,
     entries_dir,
@@ -771,6 +773,47 @@ class TestIncrementalIngest:
         assert self._read_offset(notebook, a_file.name) == a_offset_before
         assert self._read_offset(notebook, b_file.name) > b_offset_before
         assert self._read_offset(notebook, b_file.name) == b_file.stat().st_size
+
+
+# ---------------------------------------------------------------------------
+# index versioning (US-004)
+# ---------------------------------------------------------------------------
+
+
+class TestIndexVersion:
+    def test_fresh_index_is_stamped_with_current_version(self, notebook):
+        cmd_emit(make_emit_args(content="stamp me"))
+        ensure_db(notebook)[0].close()
+        assert _index_user_version(index_path(notebook)) == INDEX_USER_VERSION
+
+    def test_old_format_index_forces_rebuild(self, notebook, capsys):
+        # Build a current index, then simulate a pre-existing old-format index by
+        # rewinding its stamped layout version. Any read via ensure_db must
+        # notice the mismatch and rebuild from the JSONL (the source of truth),
+        # then re-stamp the current version — after which FTS search still works.
+        cmd_emit(make_emit_args(content="rebuildable token"))
+        ensure_db(notebook)[0].close()
+        dbp = index_path(notebook)
+        conn = sqlite3.connect(str(dbp))
+        conn.execute("PRAGMA user_version = 1")  # pretend the old layout
+        conn.commit()
+        conn.close()
+        assert _index_user_version(dbp) == 1
+
+        capsys.readouterr()  # clear
+        conn, _, _ = ensure_db(notebook)
+        err = capsys.readouterr().err
+        try:
+            assert "Index rebuilt" in err
+            assert _index_user_version(dbp) == INDEX_USER_VERSION
+            hit = conn.execute(
+                "SELECT e.content FROM entries e "
+                "JOIN entries_fts f ON f.rowid = e.rowid "
+                "WHERE entries_fts MATCH 'rebuildable'"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert hit == [("rebuildable token",)]
 
 
 # ---------------------------------------------------------------------------
