@@ -85,34 +85,34 @@ def custom_notebook(tmp_path, monkeypatch):
 
 
 def make_emit_args(**kwargs):
-    defaults = {
+    """Build an emit Namespace mirroring the argparse surface.
+
+    Schema fields are now passed via the repeatable -f/--field flag rather than
+    dynamic per-field flags, so any kwarg that is not a core/static emit arg is
+    folded into the ``field`` list as ``KEY=VALUE``. Pass ``field=[...]``
+    directly to exercise malformed or explicit -f input.
+    """
+    static = {
         "context": "test/context",
         "type": "observation",
-        "repo": None,
-        "branch": None,
-        "tags": None,
         "artifacts": None,
         "extra": None,
+        "field": None,
         "content": "Test content",
     }
-    defaults.update(kwargs)
-    return argparse.Namespace(**defaults)
+    field = list(kwargs.pop("field", None) or [])
+    for key in [k for k in kwargs if k not in static]:
+        val = kwargs.pop(key)
+        if val is not None:
+            field.append(f"{key}={val}")
+    static.update(kwargs)
+    static["field"] = field or None
+    return argparse.Namespace(**static)
 
 
-def make_custom_emit_args(**kwargs):
-    defaults = {
-        "context": "test/context",
-        "type": "observation",
-        "dataset": None,
-        "gpu_hours": None,
-        "num_nodes": None,
-        "tags": None,
-        "artifacts": None,
-        "extra": None,
-        "content": "Test content",
-    }
-    defaults.update(kwargs)
-    return argparse.Namespace(**defaults)
+# Custom-schema notebooks use different field names (dataset, gpu_hours, ...),
+# but the -f folding above is field-name agnostic, so the builder is identical.
+make_custom_emit_args = make_emit_args
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +471,101 @@ class TestEmit:
         writer_file = entries_dir(notebook) / "test-writer.jsonl"
         line = json.loads(writer_file.read_text().strip())
         assert line["expr"] == "x=y+1"
+
+
+class TestEmitFieldFlag:
+    """Schema fields are passed with repeatable -f/--field KEY=VALUE."""
+
+    def test_field_flag_round_trips_every_type(self, custom_notebook):
+        # text, integer, real, and list (comma-separated) all via -f.
+        cmd_emit(make_custom_emit_args(field=[
+            "dataset=cifar10",
+            "num_nodes=32",
+            "gpu_hours=4.5",
+            "tags=mae,vit, scaling",
+        ], content="All field types via -f"))
+
+        writer_file = entries_dir(custom_notebook) / "test-writer.jsonl"
+        line = json.loads(writer_file.read_text().strip())
+        assert line["dataset"] == "cifar10"          # text
+        assert line["num_nodes"] == 32               # integer (coerced)
+        assert line["gpu_hours"] == 4.5              # real (coerced)
+        # list value lands as a JSON array in the JSONL, not a bare string.
+        assert isinstance(line["tags"], list)
+        assert line["tags"] == ["mae", "vit", "scaling"]
+
+        conn, _, _ = ensure_db(custom_notebook)
+        row = conn.execute(
+            "SELECT dataset, num_nodes, gpu_hours FROM entries"
+        ).fetchone()
+        conn.close()
+        assert row == ("cifar10", 32, 4.5)
+
+    def test_field_flag_repeatable(self, notebook):
+        cmd_emit(make_emit_args(field=["repo=my-repo", "branch=feature/x"],
+                                content="Repeatable -f"))
+        writer_file = entries_dir(notebook) / "test-writer.jsonl"
+        line = json.loads(writer_file.read_text().strip())
+        assert line["repo"] == "my-repo"
+        assert line["branch"] == "feature/x"
+
+    def test_field_flag_artifacts_still_static(self, notebook):
+        # --artifacts remains a static flag (built-in field), not routed via -f.
+        cmd_emit(make_emit_args(artifacts="a.csv, b.png", content="static artifacts"))
+        writer_file = entries_dir(notebook) / "test-writer.jsonl"
+        line = json.loads(writer_file.read_text().strip())
+        assert line["artifacts"] == ["a.csv", "b.png"]
+
+    def test_field_flag_unknown_field_raises_suggesting_extra(self, notebook):
+        with pytest.raises(LnbError) as exc:
+            cmd_emit(make_emit_args(field=["nonesuch=1"], content="bad"))
+        msg = str(exc.value)
+        assert "nonesuch" in msg
+        assert "--extra" in msg
+
+    def test_field_flag_bad_integer_raises(self, custom_notebook):
+        with pytest.raises(LnbError) as exc:
+            cmd_emit(make_custom_emit_args(field=["num_nodes=lots"], content="bad"))
+        assert "integer" in str(exc.value)
+
+    def test_field_flag_bad_real_raises(self, custom_notebook):
+        with pytest.raises(LnbError) as exc:
+            cmd_emit(make_custom_emit_args(field=["gpu_hours=fast"], content="bad"))
+        assert "real" in str(exc.value)
+
+    def test_field_flag_malformed_raises(self, notebook):
+        with pytest.raises(LnbError):
+            cmd_emit(make_emit_args(field=["justkey"], content="bad"))
+
+
+class TestEmitHelpStable:
+    """emit --help must not depend on the working dir or LAB_NOTEBOOK_DIR:
+    the emit parser is static (no schema loading during construction)."""
+
+    def _help_out(self, monkeypatch, capsys):
+        monkeypatch.setattr("sys.argv", ["lab-notebook", "emit", "--help"])
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code == 0
+        return capsys.readouterr().out
+
+    def test_help_identical_with_and_without_notebook(
+        self, custom_notebook, tmp_path, monkeypatch, capsys
+    ):
+        # With a discoverable custom notebook (dataset/gpu_hours/... fields):
+        # under the old dynamic-argparse block these would appear as flags.
+        out_with = self._help_out(monkeypatch, capsys)
+        # Strip every notebook signal: the env var and the discovered .lnb.env.
+        monkeypatch.delenv("LAB_NOTEBOOK_DIR", raising=False)
+        (tmp_path / LNB_ENV_FILE).unlink(missing_ok=True)
+        out_without = self._help_out(monkeypatch, capsys)
+
+        assert out_with == out_without
+        assert "--field" in out_with
+        assert "-f" in out_with
+        # No schema-derived flags leak into the static help.
+        assert "--dataset" not in out_with
+        assert "--gpu_hours" not in out_with
 
 
 # ---------------------------------------------------------------------------

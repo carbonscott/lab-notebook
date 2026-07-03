@@ -21,7 +21,6 @@ import sys
 from pathlib import Path
 
 from .schema import (
-    BUILTIN_FIELDS,
     DEFAULT_TEMPLATE,
     LnbError,
     build_sql,
@@ -35,8 +34,6 @@ from .store import (
     LNB_ENV_FILE,
     Notebook,
     _atomic_rebuild,
-    _find_lnb_env,
-    _parse_lnb_env,
     entries_dir,
     get_notebook_dir,
     index_path,
@@ -160,13 +157,18 @@ def cmd_init(args: argparse.Namespace) -> None:
 def cmd_emit(args: argparse.Namespace) -> None:
     nb = Notebook(get_notebook_dir())
 
-    # Collect schema-field values from the parsed args (validation/coercion
-    # happens inside Notebook.emit, not here).
-    fields = {}
-    for name in nb.schema.get("fields", {}):
-        val = getattr(args, name, None)
-        if val is not None:
-            fields[name] = val
+    # Schema-field values come from the static --artifacts built-in plus the
+    # repeatable -f/--field KEY=VALUE flag. Names are validated (and values
+    # coerced) inside Notebook.emit — unknown field -> LnbError suggesting
+    # --extra, bad int/real -> LnbError.
+    fields: dict = {}
+    if args.artifacts is not None:
+        fields["artifacts"] = args.artifacts
+    for item in (args.field or []):
+        key, sep, value = item.partition("=")
+        if not key or not sep:
+            raise LnbError(f"Error: -f/--field must be KEY=VALUE, got '{item}'")
+        fields[key] = value
 
     # Parse repeatable --extra KEY=VALUE strings into a dict; collision checks
     # against declared fields are enforced by Notebook.emit.
@@ -307,35 +309,16 @@ def main() -> None:
     p_emit.add_argument("--type", required=True, help="Entry type (defined in schema.yaml)")
     p_emit.add_argument("--artifacts", default=None,
                         help="Files referenced by this entry (comma-separated paths)")
+    p_emit.add_argument("-f", "--field", action="append", metavar="KEY=VALUE",
+                        help="Schema field value (repeatable; e.g. -f repo=foo -f tags=a,b). "
+                             "Unknown names are rejected — use --extra for undeclared fields.")
     p_emit.add_argument("--extra", action="append", metavar="KEY=VALUE",
                         help="Extra undeclared field (repeatable)")
     p_emit.add_argument("content", help="Entry content (notebook prose)")
-
-    # Dynamically add schema-defined fields if a notebook can be found.
-    # Best-effort: don't crash arg parsing if the path is stale or schema is bad.
-    _parsed_schema = None
-    try:
-        notebook_env = os.environ.get("LAB_NOTEBOOK_DIR")
-        if not notebook_env:
-            env_file = _find_lnb_env()
-            notebook_env = _parse_lnb_env(env_file) if env_file else None
-        if notebook_env:
-            nb_dir = Path(notebook_env)
-            sf = nb_dir / "schema.yaml"
-            if sf.exists():
-                _parsed_schema = load_schema(nb_dir)
-                for name, spec in _parsed_schema.get("fields", {}).items():
-                    if name in BUILTIN_FIELDS:
-                        continue  # already added as a static argument
-                    ftype = spec.get("type", "text")
-                    help_text = f"Schema field ({ftype})"
-                    if ftype == "list":
-                        help_text = f"Schema field ({ftype}, comma-separated)"
-                    p_emit.add_argument(f"--{name}", default=None, help=help_text)
-    except (SystemExit, Exception):
-        pass  # schema loading failed — emit will load schema at runtime
-
-    p_emit.set_defaults(func=cmd_emit, _schema=_parsed_schema)
+    # No schema loading here: the emit parser is static, so --help is identical
+    # regardless of the working directory or LAB_NOTEBOOK_DIR. Schema fields are
+    # passed with -f/--field and validated at runtime in Notebook.emit.
+    p_emit.set_defaults(func=cmd_emit)
 
     # -- retract --
     p_retract = sub.add_parser(
