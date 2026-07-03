@@ -89,7 +89,7 @@ def get_writer_id() -> str:
 def generate_id() -> str:
     now = datetime.now()
     ts = now.strftime("%Y%m%dT%H%M%S")
-    rand = secrets.token_hex(2)
+    rand = secrets.token_hex(4)
     return f"{ts}-{rand}"
 
 

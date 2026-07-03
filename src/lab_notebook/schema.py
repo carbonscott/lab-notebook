@@ -36,7 +36,7 @@ def format_schema_help(schema: dict) -> str:
     fields = schema.get("fields", {})
     lines = ["Table: entries", "--------------"]
     core = [
-        ("id", "TEXT PRIMARY KEY", "e.g. 20260321T143022-a7f2"),
+        ("id", "TEXT PRIMARY KEY", "e.g. 20260321T143022-a7f2c3d1"),
         ("ts", "TEXT NOT NULL", "ISO 8601 local time"),
         ("writer_id", "TEXT NOT NULL", "e.g. cong, agent-claude-01"),
         ("context", "TEXT NOT NULL", "e.g. maxie/ssl-comparison"),

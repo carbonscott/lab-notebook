@@ -226,7 +226,7 @@ Each writer gets their own JSONL file. No merge conflicts.
 
 ```json
 {
-  "id": "20260321T143022-a7f2",
+  "id": "20260321T143022-a7f2c3d1",
   "ts": "2026-03-21T14:30:22",
   "writer_id": "cong",
   "context": "maxie/ssl-comparison",
@@ -246,11 +246,11 @@ an entry itself:
 
 ```json
 {
-  "id": "20260322T091500-c3d1",
+  "id": "20260322T091500-c3d19f4e",
   "ts": "2026-03-22T09:15:00",
   "writer_id": "cong",
   "type": "_retract",
-  "retracts": "20260321T143022-a7f2",
+  "retracts": "20260321T143022-a7f2c3d1",
   "reason": "superseded by a corrected measurement"
 }
 ```

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sqlite3
 from pathlib import Path
@@ -30,6 +31,7 @@ from lab_notebook.store import (
     ensure_db,
     entries_dir,
     flatten_entry,
+    generate_id,
     get_notebook_dir,
     index_path,
 )
@@ -690,6 +692,49 @@ class TestShow:
                 nb.get("nope-never-existed")
         finally:
             nb.close()
+
+
+# ---------------------------------------------------------------------------
+# entry ids
+# ---------------------------------------------------------------------------
+
+
+class TestEntryId:
+    def test_new_id_shape(self):
+        # generate_id() -> compact naive timestamp + '-' + 8 hex chars
+        # (secrets.token_hex(4)).
+        entry_id = generate_id()
+        assert re.fullmatch(r"\d{8}T\d{6}-[0-9a-f]{8}", entry_id), entry_id
+
+    def test_old_format_suffix_still_retracts_and_shows(self, notebook, capsys):
+        # Ids written by older code carry a 4-char (token_hex(2)) suffix.
+        # Nothing parses the suffix, so a hand-written old-format entry must
+        # still ingest, show, and retract like any current entry.
+        old_id = "20240101T120000-ab12"
+        writer_file = entries_dir(notebook) / "legacy-writer.jsonl"
+        writer_file.write_text(json.dumps({
+            "id": old_id,
+            "ts": "2024-01-01T12:00:00",
+            "writer_id": "legacy-writer",
+            "context": "legacy/ctx",
+            "type": "observation",
+            "content": "old-format entry body",
+        }) + "\n")
+
+        # show renders the full entry
+        cmd_show(make_show_args(old_id))
+        out = capsys.readouterr().out
+        assert old_id in out
+        assert "old-format entry body" in out
+
+        # retract removes it from the index
+        cmd_retract(make_retract_args(old_id))
+        conn, _, _ = ensure_db(notebook)
+        try:
+            rows = [r[0] for r in conn.execute("SELECT id FROM entries").fetchall()]
+        finally:
+            conn.close()
+        assert old_id not in rows
 
 
 # ---------------------------------------------------------------------------
