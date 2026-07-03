@@ -41,6 +41,7 @@ from lab_notebook.cli import (
     cmd_retract,
     cmd_search,
     cmd_schema,
+    cmd_show,
     cmd_sql,
     cmd_template,
     main,
@@ -601,6 +602,94 @@ class TestSql:
         out = capsys.readouterr().out
         assert "imagenet" in out
         assert "1 row" in out
+
+
+# ---------------------------------------------------------------------------
+# show
+# ---------------------------------------------------------------------------
+
+
+def make_show_args(entry_id):
+    return argparse.Namespace(id=entry_id)
+
+
+class TestShow:
+    def test_shows_all_core_and_schema_fields(self, notebook, capsys):
+        cmd_emit(make_emit_args(
+            context="demo/ctx", type="observation",
+            artifacts="a.csv,b.png", content="Full content here",
+        ))
+        entry_id = _last_id_in_file(notebook, "test-writer.jsonl")
+        capsys.readouterr()  # clear emit output
+
+        cmd_show(make_show_args(entry_id))
+        out = capsys.readouterr().out
+        # core fields
+        assert entry_id in out
+        assert "writer_id" in out
+        assert "test-writer" in out
+        assert "demo/ctx" in out
+        assert "observation" in out
+        assert "Full content here" in out
+        # built-in schema field (list stored as a JSON array)
+        assert "artifacts" in out
+        assert "a.csv" in out and "b.png" in out
+
+    def test_decodes_extra_json(self, notebook, capsys):
+        cmd_emit(make_emit_args(
+            extra=["foo=bar", "count=3"], content="entry with extras",
+        ))
+        entry_id = _last_id_in_file(notebook, "test-writer.jsonl")
+        capsys.readouterr()
+
+        cmd_show(make_show_args(entry_id))
+        out = capsys.readouterr().out
+        # extra keys are decoded into their own key/value lines, not dumped as
+        # the raw JSON blob.
+        assert "foo" in out and "bar" in out
+        assert "count" in out
+        assert '{"foo"' not in out
+
+    def test_shows_custom_schema_fields(self, custom_notebook, capsys):
+        cmd_emit(make_custom_emit_args(
+            dataset="imagenet", gpu_hours="4.5", tags="mae,vit",
+            content="custom fields entry",
+        ))
+        entry_id = _last_id_in_file(custom_notebook, "test-writer.jsonl")
+        capsys.readouterr()
+
+        cmd_show(make_show_args(entry_id))
+        out = capsys.readouterr().out
+        assert "dataset" in out and "imagenet" in out
+        assert "gpu_hours" in out and "4.5" in out
+        assert "tags" in out and "mae" in out
+
+    def test_nonexistent_id_errors(self, notebook):
+        with pytest.raises(LnbError) as exc:
+            cmd_show(make_show_args("20990101T000000-dead"))
+        assert "not found" in str(exc.value)
+
+    def test_notebook_get_api(self, notebook):
+        # Exercise the Notebook.get API directly (no argparse / cmd layer).
+        cmd_emit(make_emit_args(content="direct api entry"))
+        entry_id = _last_id_in_file(notebook, "test-writer.jsonl")
+
+        nb = Notebook(notebook)
+        try:
+            entry = nb.get(entry_id)
+        finally:
+            nb.close()
+        assert entry["id"] == entry_id
+        assert entry["content"] == "direct api entry"
+        assert entry["context"] == "test/context"
+
+    def test_notebook_get_missing_raises(self, notebook):
+        nb = Notebook(notebook)
+        try:
+            with pytest.raises(LnbError):
+                nb.get("nope-never-existed")
+        finally:
+            nb.close()
 
 
 # ---------------------------------------------------------------------------

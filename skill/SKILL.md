@@ -325,11 +325,12 @@ lab-notebook contexts
 
 Present a concise answer citing specific entries (timestamp, context, type). Do not dump raw output.
 
-SQL queries use `substr(content,1,80)` by default for scanning. If the truncated preview isn't enough to answer the question, re-run without `substr()` to see the full content:
+SQL queries use `substr(content,1,80)` by default for scanning. If the truncated preview isn't enough, pull the whole entry by id — every core and schema field plus decoded `--extra` values, in a readable key/value layout. Scan with `id` in the select list, then inspect the one you want:
 
 ```bash
 lab-notebook sql \
-  "SELECT ts, type, context, content FROM entries WHERE type='dead-end' ORDER BY ts DESC"
+  "SELECT id, type, substr(content,1,80) FROM entries WHERE type='dead-end' ORDER BY ts DESC"
+lab-notebook show 20260321T143022-a7f2
 ```
 
 **If results are empty**, suggest recovery:
