@@ -53,7 +53,7 @@ def notebook(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     args = argparse.Namespace(path=str(tmp_path / "nb"), template=None)
     cmd_init(args)
-    nb_dir = tmp_path / "nb" / ".lnb"
+    nb_dir = tmp_path / "nb"
     monkeypatch.setenv("LAB_NOTEBOOK_DIR", str(nb_dir))
     monkeypatch.setenv("LAB_NOTEBOOK_WRITER", "test-writer")
     return nb_dir
@@ -65,7 +65,7 @@ def custom_notebook(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     args = argparse.Namespace(path=str(tmp_path / "nb"), template=None)
     cmd_init(args)
-    nb_dir = tmp_path / "nb" / ".lnb"
+    nb_dir = tmp_path / "nb"
     # Overwrite schema.yaml with custom fields
     (nb_dir / "schema.yaml").write_text(
         "types:\n"
@@ -126,7 +126,7 @@ class TestInit:
         args = argparse.Namespace(path=str(tmp_path / "nb"), template=None)
         cmd_init(args)
 
-        nb_dir = tmp_path / "nb" / ".lnb"
+        nb_dir = tmp_path / "nb"
         assert nb_dir.is_dir()
         assert (nb_dir / "entries").is_dir()
         assert (nb_dir / "artifacts").is_dir()
@@ -144,7 +144,7 @@ class TestInit:
         args = argparse.Namespace(path=str(tmp_path / "nb"), template=None)
         cmd_init(args)
 
-        sf = tmp_path / "nb" / ".lnb" / "schema.yaml"
+        sf = tmp_path / "nb" / "schema.yaml"
         assert sf.exists()
         import yaml
         schema = yaml.safe_load(sf.read_text())
@@ -167,10 +167,51 @@ class TestInit:
         monkeypatch.chdir(tmp_path)
         args = argparse.Namespace(path=str(tmp_path / "proj"), template=None)
         cmd_init(args)
-        nb_dir = tmp_path / "proj" / ".lnb"
+        nb_dir = tmp_path / "proj"
         assert nb_dir.is_dir()
         assert (nb_dir / "entries").is_dir()
         assert (tmp_path / LNB_ENV_FILE).exists()
+
+    def test_init_explicit_path_is_literal(self, tmp_path, monkeypatch):
+        # An explicit path is used verbatim — no ".lnb" is appended.
+        monkeypatch.chdir(tmp_path)
+        target = tmp_path / "notes"
+        args = argparse.Namespace(path=str(target), template=None)
+        cmd_init(args)
+        assert (target / "schema.yaml").exists()
+        assert (target / "entries").is_dir()
+        # The old appending behavior would have created target/.lnb — it must not.
+        assert not (target / ".lnb").exists()
+        # .lnb.env points at the literal path.
+        assert f"LAB_NOTEBOOK_DIR={target}" in (tmp_path / LNB_ENV_FILE).read_text()
+
+    def test_init_no_arg_creates_dot_lnb(self, tmp_path, monkeypatch):
+        # No path arg -> ./.lnb in the current directory.
+        monkeypatch.chdir(tmp_path)
+        cmd_init(argparse.Namespace(path=None, template=None))
+        assert (tmp_path / ".lnb" / "schema.yaml").exists()
+
+    def test_init_refuses_existing_lnb_env(self, tmp_path, monkeypatch):
+        # A second init in the same directory refuses to clobber .lnb.env.
+        monkeypatch.chdir(tmp_path)
+        cmd_init(argparse.Namespace(path=str(tmp_path / "a"), template=None))
+        with pytest.raises(LnbError) as exc:
+            cmd_init(argparse.Namespace(path=str(tmp_path / "b"), template=None))
+        assert "already exists" in str(exc.value)
+        assert LNB_ENV_FILE in str(exc.value)
+        # The refused run must not have repointed .lnb.env at "b".
+        env_text = (tmp_path / LNB_ENV_FILE).read_text()
+        assert str(tmp_path / "a") in env_text
+        assert str(tmp_path / "b") not in env_text
+
+    def test_init_force_overwrites_lnb_env(self, tmp_path, monkeypatch):
+        # --force lets a second init repoint .lnb.env.
+        monkeypatch.chdir(tmp_path)
+        cmd_init(argparse.Namespace(path=str(tmp_path / "a"), template=None))
+        cmd_init(argparse.Namespace(
+            path=str(tmp_path / "b"), template=None, force=True))
+        env_text = (tmp_path / LNB_ENV_FILE).read_text()
+        assert f"LAB_NOTEBOOK_DIR={tmp_path / 'b'}" in env_text
 
 
 # ---------------------------------------------------------------------------
@@ -971,7 +1012,7 @@ class TestInitTemplate:
         args = argparse.Namespace(path=str(tmp_path / "nb"), template="ml-experiment-log")
         cmd_init(args)
         import yaml
-        nb_dir = tmp_path / "nb" / ".lnb"
+        nb_dir = tmp_path / "nb"
         schema = yaml.safe_load((nb_dir / "schema.yaml").read_text())
         assert "run-start" in schema["types"]
         assert "method" in schema["fields"]
@@ -985,28 +1026,29 @@ class TestInitTemplate:
 
     def test_init_template_overwrites_existing(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        nb_dir = tmp_path / "nb" / ".lnb"
+        nb_dir = tmp_path / "nb"
         # First init with default
         args = argparse.Namespace(path=str(tmp_path / "nb"), template=None)
         cmd_init(args)
         import yaml
         schema = yaml.safe_load((nb_dir / "schema.yaml").read_text())
         assert "observation" in schema["types"]
-        # Re-init with explicit template
-        args = argparse.Namespace(path=str(tmp_path / "nb"), template="ml-experiment-log")
+        # Re-init with explicit template (--force to overwrite .lnb.env)
+        args = argparse.Namespace(
+            path=str(tmp_path / "nb"), template="ml-experiment-log", force=True)
         cmd_init(args)
         schema = yaml.safe_load((nb_dir / "schema.yaml").read_text())
         assert "run-start" in schema["types"]
 
     def test_init_no_template_keeps_existing(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        nb_dir = tmp_path / "nb" / ".lnb"
+        nb_dir = tmp_path / "nb"
         args = argparse.Namespace(path=str(tmp_path / "nb"), template=None)
         cmd_init(args)
         # Overwrite schema with custom content
         (nb_dir / "schema.yaml").write_text("types:\n  - custom\nfields:\n")
-        # Re-init without --template
-        args = argparse.Namespace(path=str(tmp_path / "nb"), template=None)
+        # Re-init without --template (--force to overwrite .lnb.env)
+        args = argparse.Namespace(path=str(tmp_path / "nb"), template=None, force=True)
         cmd_init(args)
         import yaml
         schema = yaml.safe_load((nb_dir / "schema.yaml").read_text())
@@ -1019,13 +1061,14 @@ class TestInitTemplate:
         cmd_init(args)
         out = capsys.readouterr().out
         assert "from template: research-notebook" in out
-        # Re-init without template — should say "kept"
-        args = argparse.Namespace(path=str(tmp_path / "nb"), template=None)
+        # Re-init without template — should say "kept" (--force to overwrite .lnb.env)
+        args = argparse.Namespace(path=str(tmp_path / "nb"), template=None, force=True)
         cmd_init(args)
         out = capsys.readouterr().out
         assert "already exists (kept)" in out
-        # Re-init with explicit template — should say "overwritten"
-        args = argparse.Namespace(path=str(tmp_path / "nb"), template="ml-experiment-log")
+        # Re-init with explicit template — should say "overwritten" (--force to overwrite .lnb.env)
+        args = argparse.Namespace(
+            path=str(tmp_path / "nb"), template="ml-experiment-log", force=True)
         cmd_init(args)
         out = capsys.readouterr().out
         assert "overwritten" in out
@@ -1037,7 +1080,7 @@ class TestInitTemplate:
         args = argparse.Namespace(
             path=str(tmp_path / "nb"), template=None, template_path=str(custom))
         cmd_init(args)
-        nb_dir = tmp_path / "nb" / ".lnb"
+        nb_dir = tmp_path / "nb"
         assert (nb_dir / "schema.yaml").read_text() == custom.read_text()
 
     def test_init_template_path_missing_file(self, tmp_path, monkeypatch):
@@ -1051,7 +1094,7 @@ class TestInitTemplate:
 
     def test_init_template_path_overwrites_existing(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        nb_dir = tmp_path / "nb" / ".lnb"
+        nb_dir = tmp_path / "nb"
         # First init with default
         args = argparse.Namespace(
             path=str(tmp_path / "nb"), template=None, template_path=None)
@@ -1059,11 +1102,12 @@ class TestInitTemplate:
         import yaml
         schema = yaml.safe_load((nb_dir / "schema.yaml").read_text())
         assert "observation" in schema["types"]
-        # Re-init with --template-path
+        # Re-init with --template-path (--force to overwrite .lnb.env)
         custom = tmp_path / "custom.yaml"
         custom.write_text("types:\n  - note\nfields: {}\n")
         args = argparse.Namespace(
-            path=str(tmp_path / "nb"), template=None, template_path=str(custom))
+            path=str(tmp_path / "nb"), template=None, template_path=str(custom),
+            force=True)
         cmd_init(args)
         schema = yaml.safe_load((nb_dir / "schema.yaml").read_text())
         assert schema["types"] == ["note"]
@@ -1213,7 +1257,7 @@ class TestInitDefault:
         monkeypatch.chdir(tmp_path)
         args = argparse.Namespace(path="my-project", template=None)
         cmd_init(args)
-        nb_dir = tmp_path / "my-project" / ".lnb"
+        nb_dir = tmp_path / "my-project"
         assert nb_dir.is_dir()
         lnb_env = tmp_path / LNB_ENV_FILE
         content = lnb_env.read_text()

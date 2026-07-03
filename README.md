@@ -131,15 +131,18 @@ Run `lab-notebook rebuild` after changing `schema.yaml`.
 
 ## Commands
 
-### `init [path] [--template NAME | --template-path PATH]`
+### `init [path] [--template NAME | --template-path PATH] [--force]`
 
-Initialize a project-local notebook. Creates `.lnb/` in the current directory
-(or at `path` if given) with `entries/`, `artifacts/`, `schema.yaml`, and
-`.gitignore`. Also writes `.lnb.env` in the current directory for automatic
-notebook discovery. Use `--template` to pick a bundled schema template (default:
-`research-notebook`). Pass `--template` with no value to list available
-templates. Use `--template-path PATH` to load a schema from an arbitrary YAML
-file on disk (mutually exclusive with `--template`).
+Initialize a project-local notebook. With no argument, creates `./.lnb/` in the
+current directory; given a `path`, creates the notebook at exactly that path
+(the path is used verbatim — nothing is appended). Either way the directory is
+populated with `entries/`, `artifacts/`, `schema.yaml`, and `.gitignore`. Also
+writes `.lnb.env` in the current directory for automatic notebook discovery; if
+`.lnb.env` already exists, `init` refuses unless `--force` is given. Use
+`--template` to pick a bundled schema template (default: `research-notebook`).
+Pass `--template` with no value to list available templates. Use
+`--template-path PATH` to load a schema from an arbitrary YAML file on disk
+(mutually exclusive with `--template`).
 
 ### `emit --context X --type Y [--artifacts ...] [--field ...] [--extra K=V] "content"`
 

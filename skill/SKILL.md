@@ -56,7 +56,7 @@ The index is rebuilt incrementally on read. The first command after new entries 
 
 ## Init
 
-Project-local notebook setup. The CLI creates a `.lnb.env` file in the current directory and a notebook at `.lnb/` (the CLI always creates the `.lnb/` subdirectory inside the path you give, defaulting to the current directory). All `lab-notebook` commands then auto-discover it.
+Project-local notebook setup. The CLI creates a `.lnb.env` file in the current directory and a notebook directory (`./.lnb` by default, or exactly the path you give). All `lab-notebook` commands then auto-discover it.
 
 ### Step 1: Pick a notebook path
 
@@ -70,10 +70,10 @@ Ask:
 lab-notebook init [<path>]
 ```
 
-Omit `<path>` to use the default `./.lnb/`. The CLI always creates a `.lnb/` subdirectory inside the given path, so `<path>` becomes `<path>/.lnb/`. The CLI will:
-- Create the notebook directory (`<path>/.lnb/`) with `entries/`, `artifacts/`, `schema.yaml`, `.gitignore`
+Omit `<path>` to use the default `./.lnb`. An explicit `<path>` is used verbatim — nothing is appended. The CLI will:
+- Create the notebook directory (`./.lnb`, or exactly `<path>`) with `entries/`, `artifacts/`, `schema.yaml`, `.gitignore`
 - Write `.lnb.env` in the current directory
-- Warn if `.lnb.env` already exists (overwrites it)
+- Refuse if `.lnb.env` already exists — pass `--force` to overwrite it
 
 If the command fails, show the error and stop.
 
@@ -142,20 +142,20 @@ Set `LAB_NOTEBOOK_WRITER` only if they provide a value different from `$USER`.
 
 ### Step 2: Initialize the notebook
 
-First check if the notebook already exists. The CLI always creates a `.lnb/` subdirectory inside the given path. Check both locations to handle re-runs (where `LAB_NOTEBOOK_DIR` already ends in `.lnb`):
+First check if the notebook already exists. The CLI uses the given path verbatim, so the notebook lives directly at `$LAB_NOTEBOOK_DIR`:
 
 ```bash
-(test -f "$LAB_NOTEBOOK_DIR/schema.yaml" || test -f "$LAB_NOTEBOOK_DIR/.lnb/schema.yaml") && echo "EXISTS" || echo "NEW"
+test -f "$LAB_NOTEBOOK_DIR/schema.yaml" && echo "EXISTS" || echo "NEW"
 ```
 
 - If `EXISTS`: tell the user "Notebook already initialized — skipping init." Proceed to Step 3.
-- If `NEW`: run:
+- If `NEW`: run (`--force` lets init overwrite any `.lnb.env` left in the current directory, which global setup discards anyway):
 
 ```bash
-lab-notebook init "$LAB_NOTEBOOK_DIR"
+lab-notebook init "$LAB_NOTEBOOK_DIR" --force
 ```
 
-This creates the notebook at `$LAB_NOTEBOOK_DIR/.lnb/` and writes `.lnb.env` in the current directory. Since this is global setup, the `.lnb.env` file is not needed — clean it up:
+This creates the notebook at `$LAB_NOTEBOOK_DIR` and writes `.lnb.env` in the current directory. Since this is global setup, the `.lnb.env` file is not needed — clean it up:
 
 ```bash
 rm -f .lnb.env
@@ -169,16 +169,16 @@ Do not proceed past this step on failure.
 
 ### Step 3: Set and persist the environment
 
-The notebook lives at `<chosen path>/.lnb/`, so the env var must point there. Export in the current session:
+The notebook lives at exactly `<chosen path>` (the same value set in Step 1), so the env var already points there. Confirm it's exported in the current session:
 
 ```bash
-export LAB_NOTEBOOK_DIR="<chosen path>/.lnb"
+export LAB_NOTEBOOK_DIR="<chosen path>"
 ```
 
 Then tell the user to add to their shell profile (or a project `.env`) for future sessions:
 
 ```bash
-export LAB_NOTEBOOK_DIR="<chosen path>/.lnb"
+export LAB_NOTEBOOK_DIR="<chosen path>"
 export LAB_NOTEBOOK_WRITER="<username>"  # optional, defaults to $USER
 ```
 
