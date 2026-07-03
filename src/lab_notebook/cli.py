@@ -15,18 +15,14 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import os
 import sqlite3
 import sys
-from datetime import datetime
 from pathlib import Path
 
 from .schema import (
     BUILTIN_FIELDS,
-    CORE_FIELDS,
     DEFAULT_TEMPLATE,
-    RETRACT_TYPE,
     LnbError,
     build_sql,
     format_schema_help,
@@ -37,14 +33,12 @@ from .schema import (
 )
 from .store import (
     LNB_ENV_FILE,
+    Notebook,
     _atomic_rebuild,
     _find_lnb_env,
     _parse_lnb_env,
-    ensure_db,
     entries_dir,
-    generate_id,
     get_notebook_dir,
-    get_writer_id,
     index_path,
 )
 
@@ -156,119 +150,53 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 
 def cmd_emit(args: argparse.Namespace) -> None:
-    notebook_dir = get_notebook_dir()
-    writer_id = get_writer_id()
-    schema = getattr(args, "_schema", None) or load_schema(notebook_dir)
+    nb = Notebook(get_notebook_dir())
 
-    if args.type not in schema["types"]:
-        print(f"Error: type must be one of {schema['types']}, got '{args.type}'",
-              file=sys.stderr)
-        sys.exit(1)
-
-    entry = {
-        "id": generate_id(),
-        "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-        "writer_id": writer_id,
-        "context": args.context,
-        "type": args.type,
-        "content": args.content,
-    }
-
-    # Schema-defined fields
-    fields = schema.get("fields", {})
-    for name, spec in fields.items():
+    # Collect schema-field values from the parsed args (validation/coercion
+    # happens inside Notebook.emit, not here).
+    fields = {}
+    for name in nb.schema.get("fields", {}):
         val = getattr(args, name, None)
         if val is not None:
-            if spec["type"] == "list":
-                val = [v.strip() for v in val.split(",") if v.strip()]
-            elif spec["type"] == "integer":
-                val = int(val)
-            elif spec["type"] == "real":
-                val = float(val)
-        entry[name] = val
+            fields[name] = val
 
-    # --extra key=value pairs
-    reserved_keys = set(CORE_FIELDS) | set(fields.keys()) | {"extra"}
+    # Parse repeatable --extra KEY=VALUE strings into a dict; collision checks
+    # against declared fields are enforced by Notebook.emit.
+    extra: dict = {}
     if args.extra:
         for item in args.extra:
-            key, _, value = item.partition("=")
-            if not key or not _:
-                print(f"Error: --extra must be key=value, got '{item}'", file=sys.stderr)
-                sys.exit(1)
-            if key in reserved_keys:
-                print(f"Error: --extra key '{key}' conflicts with a declared field. "
-                      f"Use --{key} instead.", file=sys.stderr)
-                sys.exit(1)
-            entry[key] = value
+            key, sep, value = item.partition("=")
+            if not key or not sep:
+                raise LnbError(f"Error: --extra must be key=value, got '{item}'")
+            extra[key] = value
 
-    # Write JSONL
-    edir = entries_dir(notebook_dir)
-    edir.mkdir(exist_ok=True)
-    writer_file = edir / f"{writer_id}.jsonl"
-    with open(writer_file, "a") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        f.flush()
-        os.fsync(f.fileno())
-
+    entry = nb.emit(args.context, args.type, args.content,
+                    fields=fields, extra=extra)
     print(f"[{entry['type']}] {entry['id']}  {entry['context']}")
 
 
 def cmd_retract(args: argparse.Namespace) -> None:
-    notebook_dir = get_notebook_dir()
-    writer_id = get_writer_id()
-
-    # Confirm the target exists in the current index. A missing id means it was
-    # never written or has already been retracted — either way, nothing to do.
-    conn, schema, sql = ensure_db(notebook_dir)
+    nb = Notebook(get_notebook_dir())
     try:
-        found = conn.execute(
-            "SELECT id FROM entries WHERE id = ?", (args.id,)
-        ).fetchone()
+        nb.retract(args.id, args.reason)
     finally:
-        conn.close()
-    if not found:
-        print(f"Error: entry '{args.id}' not found "
-              f"(already retracted or never existed)", file=sys.stderr)
-        sys.exit(1)
-
-    tombstone = {
-        "id": generate_id(),
-        "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-        "writer_id": writer_id,
-        "type": RETRACT_TYPE,
-        "retracts": args.id,
-        "reason": args.reason,
-    }
-
-    # Append the tombstone to the retracting writer's own file. The deletion is
-    # applied on the next indexed read, the same way emit indexes lazily.
-    edir = entries_dir(notebook_dir)
-    edir.mkdir(exist_ok=True)
-    writer_file = edir / f"{writer_id}.jsonl"
-    with open(writer_file, "a") as f:
-        f.write(json.dumps(tombstone, ensure_ascii=False) + "\n")
-        f.flush()
-        os.fsync(f.fileno())
-
+        nb.close()
     print(f"[retracted] {args.id}  ({args.reason})")
 
 
 def cmd_sql(args: argparse.Namespace) -> None:
-    notebook_dir = get_notebook_dir()
-    conn, schema, sql = ensure_db(notebook_dir)
+    nb = Notebook(get_notebook_dir())
     try:
-        cursor = conn.execute(args.query)
+        cursor = nb.query(args.query)
         print_table(cursor)
     except sqlite3.OperationalError as e:
-        print(f"SQL error: {e}", file=sys.stderr)
-        sys.exit(1)
+        raise LnbError(f"SQL error: {e}")
     finally:
-        conn.close()
+        nb.close()
 
 
 def cmd_search(args: argparse.Namespace) -> None:
-    notebook_dir = get_notebook_dir()
-    conn, schema, sql = ensure_db(notebook_dir)
+    nb = Notebook(get_notebook_dir())
     try:
         query_sql = """SELECT e.ts, e.context, e.type, e.writer_id, substr(e.content, 1, 120)
                  FROM entries e
@@ -282,13 +210,12 @@ def cmd_search(args: argparse.Namespace) -> None:
             query_sql += " AND e.type = :type"
             params["type"] = args.type
         query_sql += " ORDER BY e.ts DESC"
-        cursor = conn.execute(query_sql, params)
+        cursor = nb.query(query_sql, params)
         print_table(cursor)
     except sqlite3.OperationalError as e:
-        print(f"Search error: {e}", file=sys.stderr)
-        sys.exit(1)
+        raise LnbError(f"Search error: {e}")
     finally:
-        conn.close()
+        nb.close()
 
 
 def cmd_schema(args: argparse.Namespace) -> None:
@@ -309,19 +236,17 @@ def cmd_rebuild(args: argparse.Namespace) -> None:
 
 
 def cmd_contexts(args: argparse.Namespace) -> None:
-    notebook_dir = get_notebook_dir()
-    conn, schema, sql = ensure_db(notebook_dir)
+    nb = Notebook(get_notebook_dir())
     try:
-        cursor = conn.execute("""\
+        cursor = nb.query("""\
             SELECT context, COUNT(*) AS entries, MIN(ts) AS first, MAX(ts) AS latest
             FROM entries GROUP BY context ORDER BY latest DESC
         """)
         print_table(cursor)
     except sqlite3.OperationalError as e:
-        print(f"SQL error: {e}", file=sys.stderr)
-        sys.exit(1)
+        raise LnbError(f"SQL error: {e}")
     finally:
-        conn.close()
+        nb.close()
 
 
 def cmd_template(args: argparse.Namespace) -> None:

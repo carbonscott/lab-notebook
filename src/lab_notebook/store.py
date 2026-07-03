@@ -305,6 +305,131 @@ def ensure_db(notebook_dir: Path, schema: dict | None = None) -> tuple[sqlite3.C
     return conn, schema, sql
 
 
+class Notebook:
+    """Programmatic API over a notebook directory.
+
+    All CLI commands are thin wrappers around this class. Field validation and
+    coercion live in `emit` (not in the CLI layer), so every caller — the CLI,
+    tests, or other Python code — gets the same enforcement.
+
+    The schema is loaded eagerly in `__init__`; a missing or invalid
+    `schema.yaml` raises `LnbError` up front.
+    """
+
+    def __init__(self, dir: Path):
+        """`dir` is the resolved notebook directory. Loads schema eagerly
+        (raises LnbError if schema.yaml is missing/invalid)."""
+        self.dir = Path(dir)
+        self.writer_id = get_writer_id()
+        self.schema = load_schema(self.dir)
+        self._conn: sqlite3.Connection | None = None
+
+    def _append(self, record: dict) -> None:
+        """Append one JSON record to the current writer's JSONL file, fsynced."""
+        edir = entries_dir(self.dir)
+        edir.mkdir(exist_ok=True)
+        writer_file = edir / f"{self.writer_id}.jsonl"
+        with open(writer_file, "a") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+    def emit(self, context: str, type: str, content: str,
+             fields: dict | None = None, extra: dict | None = None) -> dict:
+        """Validate type against schema, validate/coerce fields, append to the
+        writer's JSONL (fsync), return the entry dict.
+
+        `fields` maps schema field names to values. List fields accept either a
+        comma-separated string (CLI convention) or an already-split list;
+        integer/real fields are coerced. `extra` holds undeclared key/value
+        pairs; a key that collides with a core or schema field raises LnbError.
+        """
+        if type not in self.schema["types"]:
+            raise LnbError(
+                f"Error: type must be one of {self.schema['types']}, got '{type}'"
+            )
+
+        entry = {
+            "id": generate_id(),
+            "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "writer_id": self.writer_id,
+            "context": context,
+            "type": type,
+            "content": content,
+        }
+
+        schema_fields = self.schema.get("fields", {})
+        fields = fields or {}
+        for name, spec in schema_fields.items():
+            val = fields.get(name)
+            if val is not None:
+                if spec["type"] == "list":
+                    if isinstance(val, str):
+                        val = [v.strip() for v in val.split(",") if v.strip()]
+                elif spec["type"] == "integer":
+                    val = int(val)
+                elif spec["type"] == "real":
+                    val = float(val)
+            entry[name] = val
+
+        reserved_keys = set(CORE_FIELDS) | set(schema_fields.keys()) | {"extra"}
+        for key, value in (extra or {}).items():
+            if key in reserved_keys:
+                raise LnbError(
+                    f"Error: --extra key '{key}' conflicts with a declared field. "
+                    f"Use --{key} instead."
+                )
+            entry[key] = value
+
+        self._append(entry)
+        return entry
+
+    def retract(self, target_id: str, reason: str) -> dict:
+        """Verify the target exists in the index (LnbError if not), append a
+        tombstone to the writer's JSONL, and return the tombstone dict.
+
+        The deletion is applied lazily on the next indexed read, the same way
+        emit indexes lazily.
+        """
+        conn, _, _ = ensure_db(self.dir, self.schema)
+        try:
+            found = conn.execute(
+                "SELECT id FROM entries WHERE id = ?", (target_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+        if not found:
+            raise LnbError(
+                f"Error: entry '{target_id}' not found "
+                f"(already retracted or never existed)"
+            )
+
+        tombstone = {
+            "id": generate_id(),
+            "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "writer_id": self.writer_id,
+            "type": RETRACT_TYPE,
+            "retracts": target_id,
+            "reason": reason,
+        }
+        self._append(tombstone)
+        return tombstone
+
+    def query(self, sql: str, params=()) -> sqlite3.Cursor:
+        """Ensure index freshness (incremental ingest / rebuild), then execute.
+        Caller is responsible for closing via `close()`."""
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+        self._conn, _, _ = ensure_db(self.dir, self.schema)
+        return self._conn.execute(sql, params)
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+
 def rebuild_from_jsonl(conn: sqlite3.Connection, notebook_dir: Path,
                        schema: dict, sql: SchemaSQL) -> tuple[int, int]:
     """Clear the index and re-ingest every JSONL from byte 0.
