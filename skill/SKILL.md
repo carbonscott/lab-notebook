@@ -251,8 +251,14 @@ If user picks **A**, ask: "What file should I attach?" Then use the path as `--a
 lab-notebook emit \
     --context <context> --type <type> \
     [--artifacts <path>] \
+    [-f <field>=<value>] \
     "content"
 ```
+
+Schema fields (those declared in `schema.yaml`, e.g. `repo`, `tags`) are passed
+with the repeatable `-f KEY=VALUE` flag; `list` fields take a comma-separated
+value (`-f tags=a,b`). Use `--extra key=value` only for one-off fields not in
+the schema.
 
 **Content**: should be 1-3 sentences with specific numbers, file names, or commit hashes. If you chose option C above, the content is already distilled — use it as-is.
 

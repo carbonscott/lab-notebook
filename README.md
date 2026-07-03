@@ -55,9 +55,9 @@ lab-notebook init
 # 2. Source .lnb.env (sets LAB_NOTEBOOK_DIR and LAB_NOTEBOOK_WRITER)
 source .lnb.env
 
-# 3. Write an entry (CLI args come from schema.yaml)
+# 3. Write an entry (schema fields are passed with -f KEY=VALUE)
 lab-notebook emit --context maxie/ssl-comparison --type observation \
-    --tags mae,masking \
+    -f tags=mae,masking \
     "MAE with 75% masking spends most capacity on background."
 
 # 4. Query
@@ -144,10 +144,15 @@ Pass `--template` with no value to list available templates. Use
 `--template-path PATH` to load a schema from an arbitrary YAML file on disk
 (mutually exclusive with `--template`).
 
-### `emit --context X --type Y [--artifacts ...] [--field ...] [--extra K=V] "content"`
+### `emit --context X --type Y [--artifacts ...] [-f KEY=VALUE ...] [--extra K=V] "content"`
 
 Write a notebook entry. Required: `--context`, `--type`, content.
-Custom field flags (e.g. `--repo`, `--tags`) are generated from `schema.yaml`.
+Schema fields are passed with the repeatable `-f/--field KEY=VALUE` flag, e.g.
+`-f repo=lab-notebook -f tags=mae,masking` (a `list` field takes a
+comma-separated value). Field names are validated against `schema.yaml` at
+runtime: an unknown name is rejected with a hint to use `--extra` instead, and a
+non-numeric value for an `integer`/`real` field is an error. Because no schema
+is read while building the parser, `emit --help` is identical everywhere.
 
 ### `retract ID --reason "why"`
 

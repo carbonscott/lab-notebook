@@ -390,6 +390,19 @@ class Notebook:
 
         schema_fields = self.schema.get("fields", {})
         fields = fields or {}
+
+        # Reject unknown field names up front. schema_fields already includes the
+        # merged built-ins (e.g. artifacts), so this catches typos and values
+        # meant for the schema that were never declared. Point the caller at
+        # --extra, the escape hatch for undeclared keys.
+        for name in fields:
+            if name not in schema_fields:
+                declared = ", ".join(schema_fields) or "(none)"
+                raise LnbError(
+                    f"Error: unknown field '{name}'. Declared fields: {declared}. "
+                    f"Use --extra {name}=... for an undeclared field."
+                )
+
         for name, spec in schema_fields.items():
             val = fields.get(name)
             if val is not None:
@@ -397,9 +410,19 @@ class Notebook:
                     if isinstance(val, str):
                         val = [v.strip() for v in val.split(",") if v.strip()]
                 elif spec["type"] == "integer":
-                    val = int(val)
+                    try:
+                        val = int(val)
+                    except (TypeError, ValueError):
+                        raise LnbError(
+                            f"Error: field '{name}' expects an integer, got '{val}'"
+                        )
                 elif spec["type"] == "real":
-                    val = float(val)
+                    try:
+                        val = float(val)
+                    except (TypeError, ValueError):
+                        raise LnbError(
+                            f"Error: field '{name}' expects a real number, got '{val}'"
+                        )
             entry[name] = val
 
         reserved_keys = set(CORE_FIELDS) | set(schema_fields.keys()) | {"extra"}
