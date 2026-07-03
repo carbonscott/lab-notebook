@@ -13,7 +13,15 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from .schema import CORE_FIELDS, RETRACT_TYPE, LnbError, SchemaSQL, build_sql, load_schema
+from .schema import (
+    CORE_FIELDS,
+    INDEX_USER_VERSION,
+    RETRACT_TYPE,
+    LnbError,
+    SchemaSQL,
+    build_sql,
+    load_schema,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -93,6 +101,30 @@ def index_path(notebook_dir: Path) -> Path:
     return notebook_dir / "index.sqlite"
 
 
+def _connect(dbp: Path) -> sqlite3.Connection:
+    """Open the index with recursive_triggers ON.
+
+    entries_fts is kept in sync by triggers on entries. INSERT OR REPLACE in
+    upsert_entry deletes the replaced row before inserting the new one, but that
+    implicit delete only fires the AFTER DELETE trigger when recursive_triggers
+    is enabled. Without it, the replaced row's FTS postings orphan in the index
+    and can corrupt search once SQLite reuses the freed rowid. Every connection
+    that may write to entries goes through here.
+    """
+    conn = sqlite3.connect(str(dbp))
+    conn.execute("PRAGMA recursive_triggers = ON")
+    return conn
+
+
+def _index_user_version(dbp: Path) -> int:
+    """Return the index's stamped layout version (0 for indexes predating it)."""
+    conn = sqlite3.connect(str(dbp))
+    try:
+        return conn.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        conn.close()
+
+
 def flatten_entry(entry: dict, schema: dict) -> dict:
     fields = schema.get("fields", {})
     list_fields = {name for name, spec in fields.items() if spec["type"] == "list"}
@@ -118,33 +150,23 @@ def flatten_entry(entry: dict, schema: dict) -> dict:
 
 def upsert_entry(conn: sqlite3.Connection, entry: dict, sql: SchemaSQL,
                   commit: bool = True) -> None:
+    # entries_fts is external-content and kept in sync by triggers on entries.
+    # INSERT OR REPLACE fires the delete trigger (for the replaced row) and the
+    # insert trigger (for the new row); the connection must have
+    # recursive_triggers ON so REPLACE's implicit delete fires — see ensure_db.
     conn.execute(sql.upsert, entry)
-    row = conn.execute(
-        "SELECT rowid FROM entries WHERE id = :id", {"id": entry["id"]}
-    ).fetchone()
-    if row:
-        rowid = row[0]
-        conn.execute("DELETE FROM entries_fts WHERE rowid = ?", (rowid,))
-        fts_params = {"rowid": rowid}
-        for col in sql.fts_cols:
-            fts_params[col] = entry.get(col, "")
-        conn.execute(sql.fts_insert, fts_params)
     if commit:
         conn.commit()
 
 
 def delete_entry(conn: sqlite3.Connection, target_id: str) -> bool:
-    """Hard-delete a target entry and its FTS row. No-op if it isn't present
-    (already retracted, or the tombstone references an id that never existed).
-    Returns True if a row was actually removed, False on the no-op path."""
-    row = conn.execute(
-        "SELECT rowid FROM entries WHERE id = ?", (target_id,)
-    ).fetchone()
-    if row:
-        conn.execute("DELETE FROM entries_fts WHERE rowid = ?", (row[0],))
-        conn.execute("DELETE FROM entries WHERE id = ?", (target_id,))
-        return True
-    return False
+    """Hard-delete a target entry. The AFTER DELETE trigger keeps entries_fts in
+    sync. No-op if it isn't present (already retracted, or the tombstone
+    references an id that never existed). Returns True if a row was actually
+    removed, False on the no-op path."""
+    return conn.execute(
+        "DELETE FROM entries WHERE id = ?", (target_id,)
+    ).rowcount > 0
 
 
 def _atomic_rebuild(notebook_dir: Path, dbp: Path,
@@ -153,7 +175,7 @@ def _atomic_rebuild(notebook_dir: Path, dbp: Path,
     fd, tmp = tempfile.mkstemp(dir=str(notebook_dir), suffix='.sqlite')
     os.close(fd)
     try:
-        conn = sqlite3.connect(tmp)
+        conn = _connect(Path(tmp))
         conn.executescript(sql.create)
         rebuild_from_jsonl(conn, notebook_dir, schema, sql)
         # Report the net active count (rows actually in the index after
@@ -276,11 +298,19 @@ def ensure_db(notebook_dir: Path, schema: dict | None = None) -> tuple[sqlite3.C
         schema = load_schema(notebook_dir)
     sql = build_sql(schema)
     dbp = index_path(notebook_dir)
-    if not dbp.exists() or _schema_newer_than_index(notebook_dir, dbp):
+    # Rebuild from scratch when the index is missing, older than the schema, or
+    # written in a prior index layout (user_version mismatch). The index is
+    # disposable, so a version bump migrates old indexes transparently.
+    stale = (
+        not dbp.exists()
+        or _schema_newer_than_index(notebook_dir, dbp)
+        or _index_user_version(dbp) != INDEX_USER_VERSION
+    )
+    if stale:
         count = _atomic_rebuild(notebook_dir, dbp, schema, sql)
         print(f"Index rebuilt: {count} entries", file=sys.stderr)
     else:
-        conn = sqlite3.connect(str(dbp))
+        conn = _connect(dbp)
         fence_tripped = None
         added = retracted = 0
         try:
@@ -301,7 +331,7 @@ def ensure_db(notebook_dir: Path, schema: dict | None = None) -> tuple[sqlite3.C
             print(f"Index updated: +{added} entries", file=sys.stderr)
         elif retracted:
             print(f"Index updated: -{retracted} retracted", file=sys.stderr)
-    conn = sqlite3.connect(str(dbp))
+    conn = _connect(dbp)
     return conn, schema, sql
 
 
@@ -434,15 +464,16 @@ def rebuild_from_jsonl(conn: sqlite3.Connection, notebook_dir: Path,
                        schema: dict, sql: SchemaSQL) -> tuple[int, int]:
     """Clear the index and re-ingest every JSONL from byte 0.
 
-    Implemented by clearing entries/entries_fts/_ingest_state and delegating
-    to incremental_ingest. That gets EOF-safe offset bookkeeping for free,
-    so a fresh index ends with _ingest_state populated to current file sizes.
+    Implemented by clearing entries/_ingest_state and delegating to
+    incremental_ingest. That gets EOF-safe offset bookkeeping for free, so a
+    fresh index ends with _ingest_state populated to current file sizes.
+    Deleting the entries rows fires the AFTER DELETE trigger, which clears the
+    external-content entries_fts in step (no separate FTS delete needed).
     """
     edir = entries_dir(notebook_dir)
     if not edir.exists():
         return 0, 0
     conn.execute("DELETE FROM entries")
-    conn.execute("DELETE FROM entries_fts")
     conn.execute("DELETE FROM _ingest_state")
     conn.commit()
     return incremental_ingest(conn, notebook_dir, schema, sql)
