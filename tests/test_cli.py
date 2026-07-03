@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from lab_notebook.schema import (
+    LnbError,
     build_sql,
     get_template_path,
     list_templates,
@@ -182,7 +183,7 @@ class TestSchema:
         assert schema["fields"]["tags"]["type"] == "list"
 
     def test_load_schema_missing_file(self, tmp_path):
-        with pytest.raises(SystemExit):
+        with pytest.raises(LnbError):
             load_schema(tmp_path)
 
     def test_schema_fields_null(self, notebook):
@@ -198,21 +199,21 @@ class TestSchema:
         (notebook / "schema.yaml").write_text(
             "types:\n  - observation\nfields:\n  artifacts: {type: integer}\n"
         )
-        with pytest.raises(SystemExit):
+        with pytest.raises(LnbError):
             load_schema(notebook)
 
     def test_builtin_field_same_type_also_rejected(self, notebook):
         (notebook / "schema.yaml").write_text(
             "types:\n  - observation\nfields:\n  artifacts: {type: list}\n"
         )
-        with pytest.raises(SystemExit):
+        with pytest.raises(LnbError):
             load_schema(notebook)
 
     def test_schema_field_spec_not_dict(self, notebook):
         (notebook / "schema.yaml").write_text(
             "types:\n  - observation\nfields:\n  repo: text\n"
         )
-        with pytest.raises(SystemExit):
+        with pytest.raises(LnbError):
             load_schema(notebook)
 
     def test_build_sql_creates_custom_columns(self, custom_notebook):
@@ -247,6 +248,34 @@ class TestSchema:
         with pytest.raises(SystemExit):
             cmd_emit(make_custom_emit_args(type="milestone", content="Not allowed"))
         # 'milestone' is not in the custom schema's types list
+
+
+class TestErrorHandling:
+    """main() turns an LnbError raised anywhere below into exit 1 + stderr."""
+
+    def test_main_catches_lnberror_exits_1(self, tmp_path, monkeypatch, capsys):
+        # LAB_NOTEBOOK_DIR points at a dir with no schema.yaml, so load_schema
+        # (reached via 'schema') raises LnbError. main()'s single handler must
+        # print the message to stderr and exit 1 — same as the old sys.exit path.
+        monkeypatch.setenv("LAB_NOTEBOOK_DIR", str(tmp_path))
+        monkeypatch.setattr("sys.argv", ["lab-notebook", "schema"])
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "not found" in err
+        assert "lab-notebook init" in err
+
+    def test_main_lnberror_message_goes_to_stderr_not_stdout(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("LAB_NOTEBOOK_DIR", str(tmp_path))
+        monkeypatch.setattr("sys.argv", ["lab-notebook", "schema"])
+        with pytest.raises(SystemExit):
+            main()
+        captured = capsys.readouterr()
+        assert "not found" in captured.err
+        assert "not found" not in captured.out
 
 
 # ---------------------------------------------------------------------------
@@ -810,7 +839,7 @@ class TestTemplateHelpers:
         assert "observation" in content
 
     def test_read_template_invalid(self):
-        with pytest.raises(SystemExit):
+        with pytest.raises(LnbError):
             read_template("nonexistent")
 
     def test_print_templates(self, capsys):
@@ -834,16 +863,15 @@ class TestTemplateHelpers:
         p.write_text(body)
         assert read_template_from_path(str(p)) == body
 
-    def test_read_template_from_path_missing(self, tmp_path, capsys):
+    def test_read_template_from_path_missing(self, tmp_path):
         missing = tmp_path / "nope.yaml"
-        with pytest.raises(SystemExit):
+        with pytest.raises(LnbError) as exc:
             read_template_from_path(str(missing))
-        err = capsys.readouterr().err
-        assert "not found" in err
-        assert str(missing) in err
+        assert "not found" in str(exc.value)
+        assert str(missing) in str(exc.value)
 
     def test_read_template_from_path_directory(self, tmp_path):
-        with pytest.raises(SystemExit):
+        with pytest.raises(LnbError):
             read_template_from_path(str(tmp_path))
 
 
@@ -880,7 +908,7 @@ class TestCmdTemplate:
     def test_invalid_name(self, notebook):
         (notebook / "schema.yaml").unlink()
         args = argparse.Namespace(name="nonexistent", force=False)
-        with pytest.raises(SystemExit):
+        with pytest.raises(LnbError):
             cmd_template(args)
 
     def test_rebuild_hint_with_entries(self, notebook, capsys):
@@ -968,15 +996,14 @@ class TestInitTemplate:
         nb_dir = tmp_path / "nb" / ".lnb"
         assert (nb_dir / "schema.yaml").read_text() == custom.read_text()
 
-    def test_init_template_path_missing_file(self, tmp_path, monkeypatch, capsys):
+    def test_init_template_path_missing_file(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         missing = tmp_path / "does-not-exist.yaml"
         args = argparse.Namespace(
             path=str(tmp_path / "nb"), template=None, template_path=str(missing))
-        with pytest.raises(SystemExit):
+        with pytest.raises(LnbError) as exc:
             cmd_init(args)
-        err = capsys.readouterr().err
-        assert "not found" in err
+        assert "not found" in str(exc.value)
 
     def test_init_template_path_overwrites_existing(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -1306,7 +1333,7 @@ class TestRetract:
         assert "1 entries" in out
         assert "2 entries" not in out
 
-    def test_reserved_retract_type_rejected(self, notebook, capsys):
+    def test_reserved_retract_type_rejected(self, notebook):
         # A schema may not declare the reserved control-record type; doing so
         # would let emitted rows be silently swallowed as tombstones.
         (notebook / "schema.yaml").write_text(
@@ -1314,10 +1341,9 @@ class TestRetract:
             "  - observation\n"
             "  - _retract\n"
         )
-        with pytest.raises(SystemExit) as exc:
+        with pytest.raises(LnbError) as exc:
             load_schema(notebook)
-        assert exc.value.code == 1
-        assert "_retract" in capsys.readouterr().err
+        assert "_retract" in str(exc.value)
 
     def test_pure_retract_pass_reports_retracted_count(self, notebook, capsys):
         cmd_emit(make_emit_args(content="to retract"))

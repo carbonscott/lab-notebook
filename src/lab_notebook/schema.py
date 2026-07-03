@@ -5,12 +5,16 @@ depend on it, never the other way around.
 """
 from __future__ import annotations
 
-import sys
 from collections import namedtuple
 from importlib.resources import files
 from pathlib import Path
 
 import yaml
+
+
+class LnbError(Exception):
+    """User-facing error. main() prints str(e) to stderr and exits 1."""
+
 
 CORE_FIELDS = ("id", "ts", "writer_id", "context", "type", "content")
 RETRACT_TYPE = "_retract"  # control-record type: tombstones a target entry, never stored as a row
@@ -53,38 +57,29 @@ def format_schema_help(schema: dict) -> str:
 def load_schema(notebook_dir: Path) -> dict:
     schema_file = notebook_dir / "schema.yaml"
     if not schema_file.exists():
-        print(f"Error: {schema_file} not found. Run 'lab-notebook init' first.",
-              file=sys.stderr)
-        sys.exit(1)
+        raise LnbError(f"Error: {schema_file} not found. Run 'lab-notebook init' first.")
     with open(schema_file) as f:
         schema = yaml.safe_load(f)
     if not isinstance(schema.get("types"), list) or not schema["types"]:
-        print("Error: schema.yaml must have a non-empty 'types' list.", file=sys.stderr)
-        sys.exit(1)
+        raise LnbError("Error: schema.yaml must have a non-empty 'types' list.")
     if RETRACT_TYPE in schema["types"]:
-        print(f"Error: '{RETRACT_TYPE}' is a reserved control-record type and "
-              f"cannot be declared in schema.yaml.", file=sys.stderr)
-        sys.exit(1)
+        raise LnbError(f"Error: '{RETRACT_TYPE}' is a reserved control-record type and "
+                       f"cannot be declared in schema.yaml.")
     fields = schema.get("fields") or {}
     schema["fields"] = fields
     reserved = set(CORE_FIELDS) | {"extra"}
     for name, spec in fields.items():
         if name in reserved:
-            print(f"Error: field '{name}' conflicts with a core field.", file=sys.stderr)
-            sys.exit(1)
+            raise LnbError(f"Error: field '{name}' conflicts with a core field.")
         if not isinstance(spec, dict):
-            print(f"Error: field '{name}' must be a mapping (e.g. {{type: text}}), "
-                  f"got '{spec}'.", file=sys.stderr)
-            sys.exit(1)
+            raise LnbError(f"Error: field '{name}' must be a mapping (e.g. {{type: text}}), "
+                           f"got '{spec}'.")
         if name in BUILTIN_FIELDS:
-            print(f"Error: field '{name}' is built-in and cannot be redeclared in schema.",
-                  file=sys.stderr)
-            sys.exit(1)
+            raise LnbError(f"Error: field '{name}' is built-in and cannot be redeclared in schema.")
         ftype = spec.get("type")
         if ftype not in VALID_FIELD_TYPES:
-            print(f"Error: field '{name}' has invalid type '{ftype}'. "
-                  f"Must be one of {VALID_FIELD_TYPES}.", file=sys.stderr)
-            sys.exit(1)
+            raise LnbError(f"Error: field '{name}' has invalid type '{ftype}'. "
+                           f"Must be one of {VALID_FIELD_TYPES}.")
     # Merge built-in fields (user redeclaration is rejected above)
     for name, spec in BUILTIN_FIELDS.items():
         if name not in fields:
@@ -181,37 +176,29 @@ def get_template_path(name: str) -> Path | None:
 
 
 def read_template(name: str) -> str:
-    """Read a bundled template by name, or exit with error."""
+    """Read a bundled template by name, or raise LnbError."""
     p = get_template_path(name)
     if p is None:
         names = [t[0] for t in list_templates()]
-        print(f"Error: unknown template '{name}'. Available: {', '.join(names)}",
-              file=sys.stderr)
-        sys.exit(1)
+        raise LnbError(f"Error: unknown template '{name}'. Available: {', '.join(names)}")
     return p.read_text()
 
 
 def read_template_from_path(path: str) -> str:
-    """Read a schema template from an external file path, or exit with error."""
+    """Read a schema template from an external file path, or raise LnbError."""
     p = Path(path)
     if not p.is_file():
-        print(f"Error: template path not found or not a file: {path}",
-              file=sys.stderr)
-        sys.exit(1)
+        raise LnbError(f"Error: template path not found or not a file: {path}")
     try:
         return p.read_text()
     except OSError as e:
-        print(f"Error: failed to read template at {path}: {e}",
-              file=sys.stderr)
-        sys.exit(1)
+        raise LnbError(f"Error: failed to read template at {path}: {e}")
 
 
 def print_templates() -> None:
     """Print available templates to stdout."""
     if not SCHEMAS_DIR.is_dir():
-        print("Error: schemas directory not found. Installation may be corrupt.",
-              file=sys.stderr)
-        sys.exit(1)
+        raise LnbError("Error: schemas directory not found. Installation may be corrupt.")
     templates = list_templates()
     if not templates:
         print("No templates found.")
