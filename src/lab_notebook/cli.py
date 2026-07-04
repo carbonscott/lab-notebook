@@ -4,7 +4,7 @@ Usage:
     lab-notebook init [path] [--template NAME]
     lab-notebook emit --context X --type Y "content"
     lab-notebook retract ID --reason "why"
-    lab-notebook show ID
+    lab-notebook show [ID]
     lab-notebook sql "SELECT ..."
     lab-notebook search "query"
     lab-notebook schema
@@ -237,6 +237,28 @@ def cmd_retract(args: argparse.Namespace) -> None:
 
 
 def cmd_show(args: argparse.Namespace) -> None:
+    # No id: list every live entry as a compact table, newest first. Retracted
+    # entries are already absent from the index, so the listing is live-only.
+    # The `AS content` alias makes the header read `content` rather than the
+    # raw `substr(...)` expression. `ts` is second-resolution, so `rowid DESC`
+    # is a deterministic tiebreak for entries sharing a timestamp (not a true
+    # sub-second clock: same-second emits across writers order by ingest, which
+    # need not match wall-clock) — this just keeps the output stable and
+    # repeatable rather than planner-dependent.
+    if args.id is None:
+        nb = Notebook(get_notebook_dir())
+        try:
+            cursor = nb.query(
+                "SELECT id, ts, context, type, substr(content, 1, 80) AS content "
+                "FROM entries ORDER BY ts DESC, rowid DESC"
+            )
+            print_table(cursor)
+        except sqlite3.OperationalError as e:
+            raise LnbError(f"SQL error: {e}")
+        finally:
+            nb.close()
+        return
+
     nb = Notebook(get_notebook_dir())
     try:
         entry = nb.get(args.id)
@@ -409,8 +431,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_retract.set_defaults(func=cmd_retract)
 
     # -- show --
-    p_show = sub.add_parser("show", help="Print one entry in full by id")
-    p_show.add_argument("id", help="Id of the entry to show")
+    p_show = sub.add_parser(
+        "show", help="Print one entry in full by id, or list all entries if no id is given")
+    p_show.add_argument(
+        "id", nargs="?", default=None,
+        help="Id of the entry to show; omit to list every entry newest-first")
     p_show.set_defaults(func=cmd_show)
 
     # -- sql --

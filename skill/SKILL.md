@@ -343,6 +343,8 @@ lab-notebook sql \
 lab-notebook show 20260321T143022-a7f2c3d1
 ```
 
+To list the whole notebook without writing SQL, run `lab-notebook show` with no id — a compact `id | ts | context | type | content` table of every entry, newest first.
+
 **If results are empty**, suggest recovery:
 
 > Nothing found. Try:

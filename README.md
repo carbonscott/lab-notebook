@@ -169,13 +169,18 @@ was forgotten and why. To recover a retracted entry, restore it from a JSONL
 backup and `rebuild` — there is no un-retract command. Any writer may retract
 any entry by id.
 
-### `show ID`
+### `show [ID]`
 
-Print one entry in full by id — every core and schema field plus any `--extra`
-values (decoded from their JSON blob) — in a readable key/value layout. Empty
-fields render blank. Errors if the id is not in the index (retracted or never
-existed). Use it after a scan query (`SELECT id, ...`) when a truncated preview
-isn't enough.
+With an id, print that entry in full — every core and schema field plus any
+`--extra` values (decoded from their JSON blob) — in a readable key/value
+layout. Empty fields render blank. Errors if the id is not in the index
+(retracted or never existed). Use it after a scan query (`SELECT id, ...`) when
+a truncated preview isn't enough.
+
+With no id, list every entry as a compact table (`id | ts | context | type |
+content`), newest first, one row per entry. Retracted entries are already
+absent from the index, so the listing is live-only. This is the quickest way to
+eyeball the whole notebook or grab an id to pass back to `show`.
 
 ### `sql "query"`
 
