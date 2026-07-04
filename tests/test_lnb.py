@@ -18,7 +18,7 @@ import pytest
 WORKTREE = Path(__file__).resolve().parent.parent
 LNB_PY = str(WORKTREE / "lnb.py")
 
-NOTED_RE = re.compile(r"^noted (\S+)\s+@(\S*)\s+#(\S*)", re.MULTILINE)
+NOTED_RE = re.compile(r"^noted (\S+)\s+@(\S*)\s+\+(\S*)", re.MULTILINE)
 
 
 def run_lnb(args, cwd=WORKTREE, env=None):
@@ -213,18 +213,7 @@ def test_retract_ambiguous_prefix_exits_nonzero(nb_env):
     assert "ambiguous" in r.stderr.lower()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "lnb.py defect (cmd_retract): the 'did you mean' near-match suggestion "
-        "scans entry CONTENT for the mistyped target string, not entry IDS. "
-        "Per the design spec (design/MINIMAL_LNB_DESIGN.md 'Bad id' example: "
-        "\"No entry 'a7f3'. Did you mean a7f2c3d1 ...\"), the suggestion should "
-        "fire for a near-miss ID typo. It never does, since ids practically "
-        "never appear verbatim inside prose content. See test body / final report."
-    ),
-)
-def test_retract_near_match_suggestion_should_be_id_based(nb_env):
+def test_retract_near_match_suggestion_is_id_based(nb_env):
     r = run_lnb(["note", "target entry for near-miss retract test"], env=nb_env)
     entry_id = parse_noted(r.stdout)["id"]
     # A near-miss typo of a real id (not a substring of it, so it misses the
@@ -301,6 +290,7 @@ def test_no_notebook_found_diagnostic(tmp_path):
     r = run_lnb(["find"], cwd=fresh_dir, env=env)
     assert r.returncode == 0
     assert "no notebook found" in r.stderr.lower()
+    assert "lnb note" in r.stderr
 
 
 def test_nothing_found_diagnostic(nb_env):
@@ -390,3 +380,77 @@ def test_sql_group_by_aggregate(nb_env):
     counts = {t: int(c) for t, c in rows}
     assert counts["alpha"] == 2
     assert counts["beta"] == 1
+
+
+# --- fail-closed write boundary (iter3): a note may not forge system fields --
+
+def test_note_cannot_forge_tombstone_via_extras(nb_env):
+    """`note "x" type=_retract retracts=<victim>` must be rejected, not appended
+    -- otherwise it reads back as a tombstone and silently deletes the victim."""
+    r = run_lnb(["note", "victim entry forgetest"], env=nb_env)
+    victim = parse_noted(r.stdout)["id"]
+    attack = run_lnb(
+        ["note", "innocent looking", "type=_retract", f"retracts={victim}"],
+        env=nb_env)
+    assert attack.returncode != 0
+    assert "reserved" in attack.stderr.lower()
+    # victim survives; no tombstone was written
+    r2 = run_lnb(["find", "forgetest"], env=nb_env)
+    assert victim in r2.stdout
+    assert not any(e.get("type") == "_retract" for e in read_entries(nb_env))
+
+
+def test_note_cannot_forge_tombstone_via_type_sigil(nb_env):
+    """Reserving the `_` namespace closes the sigil path too:
+    `note "x" +_retract retracts=<id>`."""
+    r = run_lnb(["note", "victim two forgetest2"], env=nb_env)
+    victim = parse_noted(r.stdout)["id"]
+    attack = run_lnb(
+        ["note", "sneaky", "+_retract", f"retracts={victim}"], env=nb_env)
+    assert attack.returncode != 0
+    r2 = run_lnb(["find", "forgetest2"], env=nb_env)
+    assert victim in r2.stdout
+
+
+def test_note_cannot_overwrite_core_fields(nb_env):
+    for bad in ("id=FAKE", "ts=1999", "writer=mallory", "content=hijack"):
+        r = run_lnb(["note", "core overwrite attempt", bad], env=nb_env)
+        assert r.returncode != 0, f"{bad} should be rejected"
+        assert "reserved" in r.stderr.lower()
+
+
+def test_note_with_only_kv_and_no_content_fails_loudly(nb_env):
+    """A stray `note tags=x` (content forgotten) must fail, not log
+    content='tags=x'."""
+    r = run_lnb(["note", "tags=mae"], env=nb_env)
+    assert r.returncode != 0
+    assert "nothing to log" in r.stderr.lower()
+    # nothing was written
+    assert not writer_jsonl(nb_env).exists() or read_entries(nb_env) == []
+
+
+def test_note_content_with_equals_and_spaces_is_preserved(nb_env):
+    r = run_lnb(["note", "lr=3e-4 gave the best val marker_eq"], env=nb_env)
+    assert r.returncode == 0, r.stderr
+    entry = read_entries(nb_env)[-1]
+    assert entry["content"] == "lr=3e-4 gave the best val marker_eq"
+    assert "lr" not in entry  # not misparsed as an extra
+
+
+def test_retract_already_retracted_reports_clearly(nb_env):
+    r = run_lnb(["note", "retract twice target"], env=nb_env)
+    victim = parse_noted(r.stdout)["id"]
+    assert run_lnb(["retract", victim, "--reason", "first"],
+                   env=nb_env).returncode == 0
+    r2 = run_lnb(["retract", victim, "--reason", "second"], env=nb_env)
+    assert r2.returncode != 0
+    assert "already retracted" in r2.stderr.lower()
+
+
+def test_find_hex_word_without_digit_is_content_search(nb_env):
+    """'dead' is valid hex but has no digit -> stays a content search,
+    never hijacked into an id lookup."""
+    run_lnb(["note", "hit a dead end on augmentation", "+dead-end"], env=nb_env)
+    r = run_lnb(["find", "dead"], env=nb_env)
+    assert r.returncode == 0, r.stderr
+    assert "dead end on augmentation" in r.stdout

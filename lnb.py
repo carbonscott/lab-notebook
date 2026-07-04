@@ -7,14 +7,22 @@ of every line. No index, no schema, no config. When the notebook outgrows a
 scan (~10^5 entries), the reviewable next rung is `lnb sql`, which rebuilds a
 throwaway SQLite from scratch on each call -- never a persistent cache.
 
-    lnb note "content" [#type] [@context] [k=v ...]   # the whole write path
-    lnb find [terms...] [@context] [#type]            # the whole read path
+    lnb note "content" [+type] [@context] [key=value ...]   # the whole write path
+    lnb find [terms...] [@context] [+type]                  # the whole read path
     lnb retract <id> --reason "why"
-    lnb sql "SELECT ...  FROM entries"                 # optional escape hatch
+    lnb sql "SELECT ... FROM entries"                        # optional escape hatch
+
+Type defaults to "note"; context defaults to the git repo name. Both are
+overridable: +type / @context sigils (shell-safe), or --type / --context flags
+for scripts. (`#type` is also parsed, but `#` is the shell comment char, so it
+vanishes unquoted -- prefer `+type`.) Any key=value becomes an entry field,
+unvalidated: a typo'd key silently becomes a new field. The notebook trusts its
+writers -- except at the write boundary, which is fail-closed (see cmd_note).
 
 Discovery: $LNB_DIR, else the nearest `.lnb/` walking up from the cwd, else
 `./.lnb` is created on the first `note`. Writer: $LNB_WRITER, else $USER.
 """
+import difflib
 import glob
 import json
 import os
@@ -24,8 +32,15 @@ import subprocess
 import sys
 from datetime import datetime
 
-TYPES_HINT = "observation, decision, dead-end, question, milestone, note"
-ID_RE = re.compile(r"^[0-9A-Fa-fT-]{3,}$")  # a term that could be an id fragment
+CORE = ("id", "ts", "writer", "context", "type", "content")  # lnb sets these
+RESERVED = set(CORE) | {"retracts", "reason"}                # writers may not
+# An id fragment: hex/timestamp charset AND at least one digit, so plain
+# hex-lookalike words ("cafe", "dead") stay content searches, not id lookups.
+ID_RE = re.compile(r"^(?=.*\d)[0-9A-Fa-fT:+-]{3,}$")
+KV_RE = re.compile(r"^[A-Za-z_][\w.-]*=\S*$")  # key=value, no whitespace
+USAGE = ('usage: lnb note "content" [+type] [@context] [key=value ...]  |  '
+         'find [terms] [@ctx] [+type]  |  retract <id> --reason "why"  |  '
+         'sql "SELECT ... FROM entries"')
 
 
 # --- notebook discovery & identity ------------------------------------------
@@ -71,10 +86,10 @@ def default_context():
     return os.path.basename(os.getcwd()) or "notebook"
 
 
-# --- the single load path ---------------------------------------------------
+# --- the single read path & the single write path ---------------------------
 
-def load(nbdir):
-    """Scan every .lnb/*.jsonl, drop retracted ids, return entries by ts.
+def scan(nbdir):
+    """Scan every .lnb/*.jsonl -> (live entries by ts, retracted id set).
 
     Fails closed per line: a malformed/partial line is skipped with a warning,
     never crashes a read and is never rewritten.
@@ -99,9 +114,9 @@ def load(nbdir):
                         entries.append(rec)
         except OSError as e:
             warn(f"cannot read {path}: {e}")
-    live = [e for e in entries if e.get("id") not in retracted]
-    live.sort(key=lambda e: e.get("ts", ""))
-    return live
+    live = sorted((e for e in entries if e.get("id") not in retracted),
+                  key=lambda e: e.get("ts", ""))
+    return live, retracted
 
 
 def append(nbdir, record):
@@ -115,93 +130,95 @@ def append(nbdir, record):
         os.fsync(fh.fileno())
 
 
-def new_id(now):
-    return now.strftime("%Y%m%dT%H%M%S") + "-" + secrets.token_hex(4)
+def new_record(now, **fields):
+    rec = {"id": now.strftime("%Y%m%dT%H%M%S") + "-" + secrets.token_hex(4),
+           "ts": now.isoformat(timespec="seconds"),
+           "writer": writer_id()}
+    rec.update(fields)
+    return rec
+
+
+# --- one arg grammar, shared by note & find ---------------------------------
+
+def parse(args):
+    """-> (positionals, ctype, context, extras). Sigils +type/#type/@context,
+    flags --type/--context, key=value -> extras, everything else positional."""
+    positionals, ctype, context, extras = [], None, None, {}
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("--type", "--context"):
+            if i + 1 >= len(args):
+                die(f"{a} needs a value.\n{USAGE}")
+            i += 1
+            if a == "--type":
+                ctype = args[i]
+            else:
+                context = args[i]
+        elif a[:1] in "+#" and len(a) > 1:
+            ctype = a[1:]
+        elif a[:1] == "@" and len(a) > 1:
+            context = a[1:]
+        elif KV_RE.match(a):           # key=value BEFORE positional, so a stray
+            k, _, v = a.partition("=")  # `note tags=x` (no content) fails loudly
+            extras[k] = v
+        elif not a.startswith("-"):
+            positionals.append(a)
+        else:
+            die(f"unexpected argument: {a!r}\n{USAGE}")
+        i += 1
+    return positionals, ctype, context, extras
 
 
 # --- commands ---------------------------------------------------------------
 
 def cmd_note(args):
-    content, ctype, context, extras = None, "note", None, {}
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a in ("--type", "--context"):
-            i += 1
-            val = args[i] if i < len(args) else ""
-            if a == "--type":
-                ctype = val
-            else:
-                context = val
-        elif (a.startswith("#") or a.startswith("+")) and len(a) > 1:
-            ctype = a[1:]
-        elif a.startswith("@") and len(a) > 1:
-            context = a[1:]
-        elif content is None and not a.startswith("-"):
-            content = a
-        elif re.match(r"^[A-Za-z_]\w*=", a):
-            k, _, v = a.partition("=")
-            extras[k] = v
-        else:
-            die(f'unexpected argument: {a!r}\n'
-                f'usage: lnb note "content" [#type] [@context] [key=value ...]')
-        i += 1
-
+    positionals, ctype, context, extras = parse(args)
+    content = " ".join(positionals)
     if not content:
-        die('nothing to log.\n'
-            'usage: lnb note "content" [#type] [@context] [key=value ...]')
+        die(f'nothing to log.\n{USAGE}')
+    # Fail-closed write boundary: a writer may not forge the fields lnb owns,
+    # nor the `_` namespace -- otherwise `note "x" type=_retract retracts=<id>`
+    # would append a record that reads back as a tombstone and delete an entry.
+    bad = sorted(k for k in extras if k in RESERVED or k.startswith("_"))
+    if bad:
+        die(f"reserved field name(s): {', '.join(bad)} -- lnb sets these, not you.")
+    if (ctype or "").startswith("_"):
+        die("type may not start with '_' (reserved for system records).")
 
-    now = datetime.now().astimezone()
-    record = {
-        "id": new_id(now),
-        "ts": now.isoformat(timespec="seconds"),
-        "writer": writer_id(),
-        "context": context or default_context(),
-        "type": ctype,
-        "content": content,
-    }
-    record.update(extras)
+    defaulted = ctype is None
+    record = new_record(datetime.now().astimezone(),
+                        context=context or default_context(),
+                        type=ctype or "note", content=content, **extras)
     nbdir = find_notebook(create=True)
     append(nbdir, record)
-    print(f'noted {record["id"]}  @{record["context"]} #{record["type"]}')
+    flag = " (default)" if defaulted else ""
+    print(f'noted {record["id"]}  @{record["context"]} +{record["type"]}{flag}')
     print(f'  {content}')
 
 
 def cmd_find(args):
-    context = ctype = None
-    terms = []
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a in ("--type", "--context"):
-            i += 1
-            val = args[i] if i < len(args) else ""
-            if a == "--type":
-                ctype = val
-            else:
-                context = val
-        elif a.startswith("@") and len(a) > 1:
-            context = a[1:]
-        elif (a.startswith("#") or a.startswith("+")) and len(a) > 1:
-            ctype = a[1:]
-        else:
-            terms.append(a)
-        i += 1
-
+    terms, ctype, context, _ = parse(args)
     nbdir = find_notebook()
     if nbdir is None:
-        die("no notebook found here. Start one with:  lnb note \"...\"", code=0)
-    rows = load(nbdir)
+        print('no notebook found here. Start one with:  lnb note "..."',
+              file=sys.stderr)
+        return
+    rows, _ = scan(nbdir)
     if not rows:
-        die(f'notebook at {nbdir} is empty -- nothing logged yet.\n'
-            f'Start with:  lnb note "..."', code=0)
+        print(f'notebook at {nbdir} is empty -- nothing logged yet.\n'
+              f'Start with:  lnb note "..."', file=sys.stderr)
+        return
 
-    # A single id-ish term that uniquely matches an id -> show that entry whole.
+    # A single id-ish term -> that entry in full (unique), or list the matches.
     if len(terms) == 1 and not context and not ctype and ID_RE.match(terms[0]):
         hits = [e for e in rows if terms[0] in e.get("id", "")]
         if len(hits) == 1:
-            show_entry(hits[0])
-            return
+            return show_entry(hits[0])
+        if len(hits) > 1:
+            warn(f"'{terms[0]}' matches {len(hits)} ids:")
+            return print_table(hits)
+        # 0 id hits -> fall through and treat it as a content search
 
     live = rows
     if context:
@@ -218,21 +235,9 @@ def cmd_find(args):
             live = [e for e in live if q in e.get("content", "").lower()]
 
     if not live:
-        filt = ""
-        if context:
-            filt += f" @{context}"
-        if ctype:
-            filt += f" #{ctype}"
-        q = " ".join(terms)
-        contexts = len({e.get("context") for e in rows})
-        print(f'no matches for "{q}"{filt} '
-              f'({len(rows)} entries, {contexts} contexts).', file=sys.stderr)
-        print("Fewer terms usually helps, or drop the @context/#type filter.",
-              file=sys.stderr)
-        return
-
+        return no_matches(rows, terms, context, ctype)
     if not terms and not context and not ctype:
-        live = live[-10:]  # default view: the 10 most recent
+        live = live[-10:]  # default view: 10 most recent, oldest->newest
     print_table(live)
 
 
@@ -248,37 +253,27 @@ def cmd_retract(args):
             target = a
         i += 1
     if not target:
-        die("usage: lnb retract <id> --reason \"why\"")
+        die(f'usage: lnb retract <id> --reason "why"')
     if not reason:
         die("a --reason is required (recorded in the tombstone).")
 
     nbdir = find_notebook()
     if nbdir is None:
-        die("no notebook found here.")
-    rows = load(nbdir)
+        die('no notebook here.  (nothing to retract)')
+    rows, retracted = scan(nbdir)
     hits = [e for e in rows if e.get("id") == target] or \
            [e for e in rows if target in e.get("id", "")]
-    if len(hits) == 0:
-        msg = f"no entry '{target}'."
-        near = [e for e in rows if target.lower() in e.get("content", "").lower()]
-        if near:
-            e = near[0]
-            msg += f' Did you mean {e["id"]} ("{e.get("content","")[:40]}...")?'
-        die(msg)
     if len(hits) > 1:
-        die(f"'{target}' is ambiguous -- matches {len(hits)} entries. "
-            f"Use a longer id.")
+        die(f"'{target}' is ambiguous -- matches {len(hits)}: "
+            f"{', '.join(e['id'] for e in hits)}. Use a longer id.")
+    if not hits:
+        if any(target == r or target in r for r in retracted):
+            die(f"'{target}' is already retracted.")
+        die(f"no entry '{target}'.{suggest_id(target, rows)}")
 
     entry = hits[0]
-    now = datetime.now().astimezone()
-    append(nbdir, {
-        "id": new_id(now),
-        "ts": now.isoformat(timespec="seconds"),
-        "writer": writer_id(),
-        "type": "_retract",
-        "retracts": entry["id"],
-        "reason": reason,
-    })
+    append(nbdir, new_record(datetime.now().astimezone(),
+                             type="_retract", retracts=entry["id"], reason=reason))
     print(f'retracted {entry["id"]}  ({reason})')
 
 
@@ -286,31 +281,25 @@ def cmd_sql(args):
     import sqlite3
     if not args:
         die('usage: lnb sql "SELECT ... FROM entries"')
-    query = " ".join(args)
     nbdir = find_notebook()
     if nbdir is None:
-        die("no notebook found here.")
-    rows = load(nbdir)
-    core = ("id", "ts", "writer", "context", "type", "content")
+        die('no notebook here.')
+    rows, _ = scan(nbdir)
     con = sqlite3.connect(":memory:")
-    con.execute("CREATE TABLE entries "
-                "(id, ts, writer, context, type, content, extra)")
+    con.execute("CREATE TABLE entries (id, ts, writer, context, type, content, extra)")
     for e in rows:
-        extra = {k: v for k, v in e.items() if k not in core}
-        con.execute(
-            "INSERT INTO entries VALUES (?,?,?,?,?,?,?)",
-            (*(e.get(c) for c in core), json.dumps(extra) if extra else None),
-        )
+        extra = {k: v for k, v in e.items() if k not in CORE}
+        con.execute("INSERT INTO entries VALUES (?,?,?,?,?,?,?)",
+                    (*(e.get(c) for c in CORE), json.dumps(extra) if extra else None))
     try:
-        cur = con.execute(query)
+        cur = con.execute(" ".join(args))
     except sqlite3.Error as e:
         die(f"sql error: {e}")
-    out = cur.fetchall()
-    for row in out:
+    for row in cur.fetchall():
         print("\t".join("" if v is None else str(v) for v in row))
 
 
-# --- rendering & helpers ----------------------------------------------------
+# --- rendering, diagnostics & helpers ---------------------------------------
 
 def print_table(rows):
     for e in rows:
@@ -318,50 +307,66 @@ def print_table(rows):
         if len(content) > 80:
             content = content[:77] + "..."
         print(f'{e.get("id",""):<26} {e.get("ts","")[:19]:<19} '
-              f'@{e.get("context",""):<16} #{e.get("type",""):<12} {content}')
+              f'@{e.get("context",""):<16} +{e.get("type",""):<12} {content}')
 
 
 def show_entry(e):
-    core = ["id", "ts", "writer", "context", "type", "content"]
-    width = max(len(k) for k in list(e.keys()) + core)
-    for k in core:
+    width = max(len(k) for k in list(e.keys()) + list(CORE))
+    for k in CORE:
         if k in e:
             print(f"{k:<{width}}  {e[k]}")
     for k, v in e.items():
-        if k not in core:
+        if k not in CORE:
             print(f"{k:<{width}}  {v}")
+
+
+def no_matches(rows, terms, context, ctype):
+    """Diagnose -> hypothesize -> prescribe (Conway): say what DOES exist."""
+    q = " ".join(terms)
+    filt = (f" @{context}" if context else "") + (f" +{ctype}" if ctype else "")
+    print(f'no matches for "{q}"{filt} '
+          f'({len(rows)} entries, {len({e.get("context") for e in rows})} contexts).',
+          file=sys.stderr)
+    if context and not any(e.get("context") == context for e in rows):
+        print(f"  contexts present: {vocab(rows, 'context')}", file=sys.stderr)
+    if ctype and not any(e.get("type") == ctype for e in rows):
+        print(f"  types present: {vocab(rows, 'type')}", file=sys.stderr)
+    print("Fewer terms usually helps, or drop the @context/+type filter.",
+          file=sys.stderr)
+
+
+def vocab(rows, field):
+    return ", ".join(sorted({str(e.get(field)) for e in rows if e.get(field)}))
+
+
+def suggest_id(target, rows):
+    ids = [e["id"] for e in rows]
+    suffixes = {i.split("-")[-1]: i for i in ids}
+    near = difflib.get_close_matches(target, ids + list(suffixes), n=1, cutoff=0.4)
+    if not near:
+        return ""
+    full = suffixes.get(near[0], near[0])
+    snippet = next((e.get("content", "") for e in rows if e["id"] == full), "")
+    return f' Did you mean {full} ("{snippet[:40]}")?'
 
 
 def warn(msg):
     print(f"lnb: {msg}", file=sys.stderr)
 
 
-def die(msg, code=1):
-    print(f"lnb: {msg}" if code else msg, file=sys.stderr)
-    sys.exit(code)
-
-
-USAGE = """lnb -- minimal lab notebook
-
-  lnb note "content" [#type] [@context] [key=value ...]
-  lnb find [terms...] [@context] [#type]
-  lnb retract <id> --reason "why"
-  lnb sql "SELECT ... FROM entries"
-
-types are free-form; common ones: %s
-""" % TYPES_HINT
+def die(msg):
+    print(f"lnb: {msg}", file=sys.stderr)
+    sys.exit(1)
 
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if not argv or argv[0] in ("-h", "--help", "help"):
-        print(USAGE)
+        print(__doc__)
         return 0
     cmd, rest = argv[0], argv[1:]
-    dispatch = {
-        "note": cmd_note, "find": cmd_find,
-        "retract": cmd_retract, "sql": cmd_sql,
-    }
+    dispatch = {"note": cmd_note, "find": cmd_find,
+                "retract": cmd_retract, "sql": cmd_sql}
     if cmd not in dispatch:
         die(f"unknown command {cmd!r}.\n{USAGE}")
     dispatch[cmd](rest)
