@@ -1,16 +1,19 @@
 [project]
-name = "lab-notebook"
+name = "lnb-min"
 version = "0.1.0"
-description = "Append-only lab notebook with SQL query support"
-requires-python = ">=3.11"
-dependencies = ["pyyaml"]
+description = "Minimal lab notebook: a git-tracked, append-only log you scan."
+requires-python = ">=3.9"
+dependencies = []
 
 [project.optional-dependencies]
 test = ["pytest"]
 
 [project.scripts]
-lab-notebook = "lab_notebook.cli:main"
+lnb = "lnb:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["lnb.py"]
