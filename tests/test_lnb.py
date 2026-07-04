@@ -454,3 +454,176 @@ def test_find_hex_word_without_digit_is_content_search(nb_env):
     r = run_lnb(["find", "dead"], env=nb_env)
     assert r.returncode == 0, r.stderr
     assert "dead end on augmentation" in r.stdout
+
+
+# --- find -o json / --output json (JSONL output mode) ------------------------
+#
+# Contract (see .goal/lnb-json-output.spec.md): stdout carries ONLY compact
+# JSONL -- one verbatim record per live/matched entry; the id-fragment unique
+# path emits ONE plain object (NOT a full-dump wrapper); zero matches emit zero
+# lines at exit 0 with the diagnostic on stderr; retractions are excluded; no
+# 80-char display truncation; unknown formats are rejected loudly; the flag is
+# local to `find`.
+
+def _json_lines(stdout):
+    """The non-empty stdout lines, each parsed as JSON (fails if any isn't)."""
+    lines = [l for l in stdout.splitlines() if l.strip()]
+    return [json.loads(l) for l in lines]
+
+
+def test_find_json_unique_id_is_one_plain_object_with_extras_toplevel(nb_env):
+    """`find <id> -o json` -> exactly ONE line of valid JSON equal to the
+    stored record, with a key=value extra surfaced as a TOP-LEVEL key
+    (invariant shape: one plain object, not a nested/full-dump wrapper)."""
+    r = run_lnb(["note", "json unique fetch marker uj71", "mae=0.9"], env=nb_env)
+    assert r.returncode == 0, r.stderr
+    entry_id = parse_noted(r.stdout)["id"]
+
+    r2 = run_lnb(["find", entry_id, "-o", "json"], env=nb_env)
+    assert r2.returncode == 0, r2.stderr
+    lines = [l for l in r2.stdout.splitlines() if l.strip()]
+    assert len(lines) == 1, f"expected exactly one JSONL line, got: {lines!r}"
+
+    obj = json.loads(lines[0])
+    assert obj["id"] == entry_id
+    assert obj["mae"] == "0.9"            # extra is a top-level typed key
+    # equals the stored record verbatim
+    stored = next(e for e in read_entries(nb_env) if e["id"] == entry_id)
+    assert obj == stored
+
+
+def test_find_json_single_entry_passes_strict_parse(nb_env):
+    """The single-entry json output is a valid JSON document: it survives a
+    strict `python -m json.tool` parse, and is exactly one non-empty line."""
+    r = run_lnb(["note", "json strict parse marker sp42"], env=nb_env)
+    entry_id = parse_noted(r.stdout)["id"]
+
+    r2 = run_lnb(["find", entry_id, "-o", "json"], env=nb_env)
+    assert r2.returncode == 0, r2.stderr
+    lines = [l for l in r2.stdout.splitlines() if l.strip()]
+    assert len(lines) == 1
+
+    strict = subprocess.run(
+        [sys.executable, "-m", "json.tool"],
+        input=lines[0], capture_output=True, text=True, timeout=10,
+    )
+    assert strict.returncode == 0, strict.stderr
+
+
+def test_find_json_multi_row_is_valid_jsonl_only(nb_env):
+    """Several matches -> every non-empty stdout line independently parses as
+    JSON (valid JSONL), the count equals the matched live entries, and stdout
+    contains ONLY json (no human table header/framing)."""
+    shared = "sharedjsonterm"
+    for i in range(3):
+        assert run_lnb(["note", f"row {i} {shared} entry"],
+                       env=nb_env).returncode == 0
+
+    r = run_lnb(["find", shared, "-o", "json"], env=nb_env)
+    assert r.returncode == 0, r.stderr
+    objs = _json_lines(r.stdout)           # raises if any line isn't JSON
+    assert len(objs) == 3
+    assert all(isinstance(o, dict) and "id" in o for o in objs)
+    assert all(shared in o.get("content", "") for o in objs)
+
+
+def test_find_json_empty_result_is_zero_lines_exit0_diag_on_stderr(nb_env):
+    """No match in json mode -> ZERO non-empty stdout lines, exit 0, and the
+    human 'no matches' diagnostic lands on stderr (never on stdout)."""
+    assert run_lnb(["note", "some unrelated json entry"],
+                   env=nb_env).returncode == 0
+
+    r = run_lnb(["find", "zzz_no_such_term_zzz", "-o", "json"], env=nb_env)
+    assert r.returncode == 0, r.stderr
+    assert [l for l in r.stdout.splitlines() if l.strip()] == []
+    assert r.stderr.strip() != ""
+
+
+def test_find_json_excludes_retracted_and_never_emits_tombstone(nb_env):
+    """Retracted entries are excluded from -o json: after retracting one of two
+    entries sharing a marker, the retracted id never appears and no emitted
+    record has type '_retract' (the live sibling still does)."""
+    marker = "retract-json-marker-rj9"
+    a = parse_noted(run_lnb(["note", f"first {marker}"], env=nb_env).stdout)["id"]
+    b = parse_noted(run_lnb(["note", f"second {marker}"], env=nb_env).stdout)["id"]
+    assert run_lnb(["retract", a, "--reason", "drop it"],
+                   env=nb_env).returncode == 0
+
+    r = run_lnb(["find", marker, "-o", "json"], env=nb_env)
+    assert r.returncode == 0, r.stderr
+    objs = _json_lines(r.stdout)
+    ids = [o["id"] for o in objs]
+    assert a not in ids                    # retracted -> excluded
+    assert b in ids                        # live sibling survives
+    assert all(o.get("type") != "_retract" for o in objs)
+
+
+def test_find_json_unknown_format_rejected_naming_json(nb_env):
+    """An unknown -o value exits nonzero and the guidance names the accepted
+    format 'json'."""
+    run_lnb(["note", "unknown format probe entry"], env=nb_env)
+    r = run_lnb(["find", "probe", "-o", "xml"], env=nb_env)
+    assert r.returncode != 0
+    assert "json" in r.stderr.lower()
+
+
+def test_note_rejects_output_flag(nb_env):
+    """`-o/--output` is find-local: `note ... -o json` must be rejected, not a
+    silent no-op."""
+    r = run_lnb(["note", "note with output flag", "-o", "json"], env=nb_env)
+    assert r.returncode != 0
+    assert r.stderr.strip() != ""
+
+
+def test_find_json_long_form_output_flag_equivalent(nb_env):
+    """`--output json` behaves identically to `-o json` for a unique-id fetch:
+    one valid json line."""
+    r = run_lnb(["note", "long form output marker lf33"], env=nb_env)
+    entry_id = parse_noted(r.stdout)["id"]
+
+    r2 = run_lnb(["find", entry_id, "--output", "json"], env=nb_env)
+    assert r2.returncode == 0, r2.stderr
+    lines = [l for l in r2.stdout.splitlines() if l.strip()]
+    assert len(lines) == 1
+    assert json.loads(lines[0])["id"] == entry_id
+
+
+def test_find_json_no_content_truncation(nb_env):
+    """json mode emits content verbatim -- the human 80-char table truncation
+    must NOT apply."""
+    long_content = "verbatim-marker-vb42 " + "z" * 100
+    r = run_lnb(["note", long_content], env=nb_env)
+    entry_id = parse_noted(r.stdout)["id"]
+
+    r2 = run_lnb(["find", entry_id, "-o", "json"], env=nb_env)
+    assert r2.returncode == 0, r2.stderr
+    obj = json.loads(r2.stdout.splitlines()[0])
+    assert obj["content"] == long_content
+    assert len(obj["content"]) > 80        # would have been truncated in table
+
+
+def test_find_output_flag_missing_value_exits_nonzero(nb_env):
+    """`find <id> -o` with no following value exits nonzero (no IndexError)."""
+    r = run_lnb(["find", "20260101T000000-abcd1234", "-o"], env=nb_env)
+    assert r.returncode != 0
+    assert r.stderr.strip() != ""
+
+
+def test_retract_rejects_output_flag_and_does_not_retract(nb_env):
+    """`-o/--output` is find-local. `retract <id> -o json` must be rejected
+    LOUDLY (not silently swallowed while the retraction still happens) -- the
+    fail-closed boundary from the iter-2 independent review. The entry must
+    survive."""
+    marker = "retract-outflag-marker-rof7"
+    r = run_lnb(["note", f"keep me {marker}"], env=nb_env)
+    victim = parse_noted(r.stdout)["id"]
+
+    attack = run_lnb(["retract", victim, "-o", "json", "--reason", "sneaky"],
+                     env=nb_env)
+    assert attack.returncode != 0, "retract must reject -o, not swallow it"
+    assert attack.stderr.strip() != ""
+
+    # the entry was NOT retracted: it still surfaces, and no tombstone exists
+    r2 = run_lnb(["find", marker, "-o", "json"], env=nb_env)
+    assert victim in r2.stdout
+    assert not any(e.get("type") == "_retract" for e in read_entries(nb_env))

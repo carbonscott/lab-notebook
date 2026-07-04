@@ -1,0 +1,25 @@
+{
+  "goal": "On a new branch off dev-min in the minimal lnb worktree, decide via an independent persona debate whether `-o json` earns its place; if GO, implement it on the surfaces that earn it with an independent review after each change while staying minimal (single stdlib-only file); if NO-GO, record the reasoned rejection.",
+  "type": "deterministic",
+  "run": "Keep working across turns toward done_when below. After each turn, check done_when against what you have surfaced in this conversation — the evaluator reads conversation text only and cannot run tools or read files. If any item is not demonstrably met in surfaced text, continue, treating the unmet item as the next turn's directive. When all items are met, stop. Do not stop early on partial progress; do not exceed the bound. (In Claude Code, /goal automates exactly this loop.)",
+  "operating_mode": {
+    "role": "You are an orchestrator in the git worktree /home/exedev/codes/lab-notebook-min, on a NEW branch off dev-min. Each iteration (= one turn): think about the next slice, decompose it, delegate to subagents via the Agent tool, then integrate. The persona debate and every code review MUST be run by independent subagents, never yourself. Rejecting the feature with reasons is a fully valid outcome.",
+    "budget": "Delegate to at least 2 and at most 5 subagents per iteration.",
+    "iterations": "Complete at least 3 iterations before done_when may be considered met, even if it appears satisfied earlier — use surplus iterations to verify JSON validity, harden edge cases, and re-review.",
+    "ledger": "Maintain .goal/lnb-json-output.ledger.json on disk, appending one entry per iteration: {n, thought, delegated:[{agent,task,model}], integrated, new, remaining}. 'new' must name a decision or artifact that did not exist before this iteration. At the end of EVERY turn, print the complete current ledger JSON verbatim in a fenced code block headed LEDGER. The evaluator reads conversation text only: a ledger not printed this turn does not exist."
+  },
+  "done_when": [
+    "An independent persona debate (>=3 distinct /agent-persona lenses) reached a GO or NO-GO verdict on `-o json`; this turn prints the verdict, a one-line rationale per persona, and the decided scope (which command surfaces, if any, get `-o json`).",
+    "GO branch: `lnb find <id> -o json` emits valid JSON for a real entry, proven by printing this turn the output and exit code of `lnb find <ID> -o json | python -m json.tool >/dev/null; echo rc=$?` showing rc=0; every other surface in the decided scope is shown valid the same way. OR the verdict is NO-GO and the printed rationale records why.",
+    "GO branch: each code change was reviewed by an independent subagent; this turn prints each review's verdict (approve / changes-requested) with every changes-requested item resolved and re-reviewed. OR the verdict is NO-GO.",
+    "The test suite passes, proven by printing the final pytest summary line showing N passed and 0 failed — existing tests unweakened; the GO branch adds tests covering json output.",
+    "Minimality is honored, proven by printing `wc -l lnb.py` and stating lnb.py is still one stdlib-only file with no new runtime dependency (print that pyproject.toml [project] dependencies is unchanged).",
+    "The full ledger JSON is printed in this turn's output and shows at least 3 completed iterations, each with a non-empty 'new' field."
+  ],
+  "guardrails": [
+    "Never touch `main` or the lab-notebook worktree; work only on a new branch off dev-min; PRs target dev-min.",
+    "No new runtime dependencies — stdlib only; lnb.py stays one file.",
+    "Do not weaken, skip, or delete existing tests to make the suite pass."
+  ],
+  "bound": "OR: the printed ledger shows 9 completed iterations. In that case print the ledger plus a gap report listing every unmet done_when item, and stop — this counts as bounded termination."
+}
