@@ -101,6 +101,27 @@ def index_path(notebook_dir: Path) -> Path:
     return notebook_dir / "index.sqlite"
 
 
+def open_readonly(notebook_dir: Path) -> sqlite3.Connection | None:
+    """Open the index read-only for side-effect-free reads (completion).
+
+    Never rebuilds or ingests; tolerates a stale index. Returns None if the
+    index does not exist yet or cannot be opened.
+
+    ``mode=ro`` (not ``immutable=1``) — the index is genuinely rebuilt by normal
+    ops, so we want a read-only handle that still respects locking, not an
+    immutable claim that could read a half-written file.
+    """
+    dbp = index_path(notebook_dir)
+    if not dbp.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"{dbp.resolve().as_uri()}?mode=ro", uri=True)
+        conn.execute("PRAGMA query_only = ON")
+        return conn
+    except sqlite3.OperationalError:
+        return None
+
+
 def _connect(dbp: Path) -> sqlite3.Connection:
     """Open the index with recursive_triggers ON.
 

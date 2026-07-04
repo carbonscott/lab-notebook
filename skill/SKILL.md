@@ -227,6 +227,11 @@ lab-notebook contexts
 
 Infer from conversation context when possible. Ask only if unclear.
 
+> With shell completion installed (`source <(lab-notebook completion bash)`),
+> `emit --context <TAB>` and `search --context <TAB>` tab-complete existing
+> contexts, and `emit --type <TAB>` completes the schema's types — so a human at
+> the prompt can skip the explicit `contexts`/`schema` lookups.
+
 ### Step 3: Check content length
 
 Before drafting, assess whether the content is too long to fit in a single entry (longer than ~3 sentences, or contains raw output, data dumps, or multiple distinct ideas).
@@ -259,6 +264,11 @@ Schema fields (those declared in `schema.yaml`, e.g. `repo`, `tags`) are passed
 with the repeatable `-f KEY=VALUE` flag; `list` fields take a comma-separated
 value (`-f tags=a,b`). Use `--extra key=value` only for one-off fields not in
 the schema.
+
+> With shell completion installed, `emit -f <TAB>` completes the schema's field
+> names (as `name=`) and `emit -f repo=<TAB>` completes distinct values already
+> recorded for that field — a fast way to discover valid field names and reuse
+> prior values without opening `schema.yaml`.
 
 **Content**: should be 1-3 sentences with specific numbers, file names, or commit hashes. If you chose option C above, the content is already distilled — use it as-is.
 

@@ -204,6 +204,41 @@ templates. With a name, copies that template to the current notebook's
 `schema.yaml` (requires `--force` if `schema.yaml` already exists).
 Run `lab-notebook rebuild` afterward if entries exist.
 
+### `completion bash`
+
+Print a bash tab-completion script. Register it for the current shell with:
+
+```bash
+source <(lab-notebook completion bash)
+```
+
+Add that line to your `~/.bashrc` to enable it permanently. Once registered,
+Tab completes:
+
+| At | Completes to |
+|----|--------------|
+| `lab-notebook <TAB>` | the subcommands |
+| `emit --type <TAB>` | entry types from `schema.yaml` |
+| `emit --context <TAB>` / `search --context <TAB>` | distinct contexts already in the notebook |
+| `emit -f <TAB>` | schema field names (each as `name=`) |
+| `emit -f repo=<TAB>` | distinct existing values for that field |
+| `<subcommand> -<TAB>` | that subcommand's flags |
+
+All candidates resolve **live** from the target notebook (`schema.yaml` and
+`index.sqlite`). Completion is strictly **read-only**: it opens the index in
+read-only mode and never rebuilds or ingests, so pressing Tab has no side
+effects and never prints an "Index rebuilt" line. If the notebook can't be
+resolved, the schema is missing, or the index doesn't exist yet, the affected
+slot simply offers nothing (schema-only slots like `--type` still work without
+an index). Candidates are inserted **literally**: shell metacharacters and glob
+characters in notebook data (`*`, `$(...)`, backticks, …) are never expanded or
+executed at Tab-time. A value containing whitespace still completes as a single
+unquoted word, so it may need manual quoting — in practice contexts, types,
+field names, and tags are space-free.
+
+Completion is wired through an internal `__complete` subcommand that the bash
+function calls; you never invoke it directly.
+
 ## Data Layout
 
 ```

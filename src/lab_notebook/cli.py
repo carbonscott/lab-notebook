@@ -11,6 +11,7 @@ Usage:
     lab-notebook rebuild
     lab-notebook contexts
     lab-notebook template [name] [--force]
+    lab-notebook completion bash
 """
 from __future__ import annotations
 
@@ -40,6 +41,7 @@ from .store import (
     get_notebook_dir,
     index_path,
 )
+from .complete import complete
 
 EXAMPLE_QUERIES = """\
 Example queries
@@ -59,6 +61,44 @@ WHERE entries_fts MATCH 'search term';
 -- Entries per context
 SELECT context, COUNT(*) AS n, MIN(ts) AS first, MAX(ts) AS latest
 FROM entries GROUP BY context ORDER BY latest DESC;
+"""
+
+# Bash registration script printed by `lab-notebook completion bash`. Install
+# with `source <(lab-notebook completion bash)`. The function shells out to the
+# hidden `__complete` subcommand at Tab-time; all completion knowledge lives in
+# Python (see complete.py), the shell stays dumb.
+#
+# Candidates are read one-per-line straight into COMPREPLY and are NEVER routed
+# through `compgen -W`. `compgen -W` re-expands every word in its list — command
+# substitution, backticks, globbing — so a candidate drawn from untrusted
+# notebook data (a context, tag, or field value like `$(rm -rf ~)` or `*`) would
+# be executed or glob-expanded the instant a user pressed Tab. Instead, a
+# `while read` loop assigns each line literally and does the prefix match in the
+# shell with a quoted pattern (`"$cur"*`), so every candidate stays inert text.
+# `read` + process substitution also keeps this working on bash 3.2 (no
+# `mapfile`).
+#
+# '=' is in bash's default COMP_WORDBREAKS, so `-f repo=ma` tokenizes to
+# `… -f repo = ma`: Python keys off the '=' token to find the field, and the
+# in-shell prefix match completes only the post-'=' word (`ma`→`mae`), leaving
+# `repo=` intact. The `cur=="="` remap covers the empty-value case
+# (`-f repo=<TAB>`). Passing `--` before the words makes argparse treat
+# flag-like tokens (`--type`, `-f`) as positionals rather than options.
+BASH_COMPLETION_SCRIPT = r"""_lab_notebook_complete() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    [[ "$cur" == "=" ]] && cur=""          # '=' wordbreak: empty value after key=
+    local line
+    COMPREPLY=()
+    while IFS= read -r line; do
+        [[ "$line" == "$cur"* ]] && COMPREPLY+=("$line")
+    done < <(lab-notebook __complete "$COMP_CWORD" -- "${COMP_WORDS[@]}" 2>/dev/null)
+    # Field-key candidates end with '=' — keep the cursor attached so the value
+    # can be typed immediately. Only suppress the trailing space in that case.
+    if [[ ${#COMPREPLY[@]} -gt 0 && "${COMPREPLY[0]}" == *= ]]; then
+        compopt -o nospace
+    fi
+}
+complete -F _lab_notebook_complete lab-notebook
 """
 
 
@@ -301,11 +341,28 @@ def cmd_template(args: argparse.Namespace) -> None:
         print("Run 'lab-notebook rebuild' to re-index existing entries.")
 
 
+def cmd_completion(args: argparse.Namespace) -> None:
+    # args.shell is constrained to "bash" by argparse choices.
+    print(BASH_COMPLETION_SCRIPT, end="")
+
+
+def cmd___complete(args: argparse.Namespace) -> None:
+    # Internal RPC target for the shell function. Must never raise on odd input
+    # (a Tab press should never spew a traceback), so swallow everything and
+    # emit nothing on failure. complete() already returns [] for the expected
+    # degradation paths; this also guards genuinely malformed argv.
+    try:
+        for candidate in complete(args.words, args.cword):
+            print(candidate)
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="lab-notebook",
         description="Lab notebook: append-only JSONL + SQLite query index",
@@ -388,6 +445,25 @@ def main() -> None:
                             help="Overwrite existing schema.yaml")
     p_template.set_defaults(func=cmd_template)
 
+    # -- completion -- (prints a shell registration script)
+    p_completion = sub.add_parser("completion", help="Print a shell completion script")
+    p_completion.add_argument("shell", choices=["bash"])
+    p_completion.set_defaults(func=cmd_completion)
+
+    # -- __complete -- (internal RPC target for the shell function; no help= so
+    # it carries no description in --help. The name still appears in the usage
+    # metavar — argparse has no clean way to drop one choice from it — but users
+    # are not meant to invoke it directly.)
+    p_complete = sub.add_parser("__complete")
+    p_complete.add_argument("cword", type=int)
+    p_complete.add_argument("words", nargs="*")
+    p_complete.set_defaults(func=cmd___complete)
+
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
     try:
         args.func(args)
