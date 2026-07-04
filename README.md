@@ -236,7 +236,7 @@ executed at Tab-time. A value containing whitespace still completes as a single
 unquoted word, so it may need manual quoting — in practice contexts, types,
 field names, and tags are space-free.
 
-Completion is wired through a hidden `__complete` subcommand that the bash
+Completion is wired through an internal `__complete` subcommand that the bash
 function calls; you never invoke it directly.
 
 ## Data Layout

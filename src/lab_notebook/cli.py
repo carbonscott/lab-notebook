@@ -450,8 +450,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_completion.add_argument("shell", choices=["bash"])
     p_completion.set_defaults(func=cmd_completion)
 
-    # -- __complete -- (hidden RPC target for the shell function; no help= so it
-    # stays out of the visible subcommand listing)
+    # -- __complete -- (internal RPC target for the shell function; no help= so
+    # it carries no description in --help. The name still appears in the usage
+    # metavar — argparse has no clean way to drop one choice from it — but users
+    # are not meant to invoke it directly.)
     p_complete = sub.add_parser("__complete")
     p_complete.add_argument("cword", type=int)
     p_complete.add_argument("words", nargs="*")
