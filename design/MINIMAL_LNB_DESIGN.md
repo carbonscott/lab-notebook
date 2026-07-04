@@ -64,7 +64,8 @@ lines of config-driven DDL) evaporate.
 - First `note` in a tree with no `.lnb/` **creates** `./.lnb/` — `init` dissolves.
 
 ### `lnb find [terms...] [@context] [#type]`   *(the whole read path — absorbs show/search/contexts)*
-- **No args** → last 10 entries newest-first: `id | ts | context | type | content[:80]`.
+- **No args** → last 10 entries, oldest→newest (tail-style: the newest line lands
+  next to your prompt): `id | ts | context | type | content[:80]`.
 - A single term that is a **unique id-prefix** → full key/value dump of that entry
   (`lnb find a7f2`, not a 24-char id).
 - Otherwise **case-insensitive substring/regex** over content, filtered by
@@ -127,10 +128,21 @@ into the tool. The minimal skill keeps only genuine agent-layer value:
 
 | | Current | Minimal (target) |
 |--|--:|--:|
-| CLI / core | 1481 (4 modules) | ≤ 250 (`lnb.py`, 1 file) |
-| SKILL.md | 429 | 60–80 |
-| README | 307 | ~60 |
+| CLI / core | 1481 (4 modules) | ~305 (`lnb.py`, 1 file) |
+| SKILL.md | 429 | ~70 |
+| README | 307 | ~75 |
 | Deps | `pyyaml` + build tooling | `[]` (stdlib) |
+
+> **Budget reconciliation (post-build, honest).** The ≤250 line estimate was for
+> the pure CRUD core. The realized `lnb.py` is ~305 lines: a shared `parse()`
+> recovered the ~25 lines of duplicated arg-loops the review flagged, but that
+> saving was *reinvested* into the two things the same review said minimal must
+> **not** cut — the fail-closed write boundary (~6 lines) and Conway-grade
+> diagnostics (~30 lines: nothing-found vocabulary, id-based retract suggestion,
+> already-retracted detection). Per geohot's own anti-code-golf rule, the target
+> is a low **concept** count (4 commands, one `scan`, one `parse`, one `append`),
+> not a low line count — and that is met. Golfing the diagnostics away to hit 250
+> would trade the tool's UX for a number.
 
 ## The one honest tradeoff (owned, not hidden)
 
@@ -150,3 +162,36 @@ index are the reviewable next rungs. The minimal version **trusts its writers**.
 4. `README.md` — ~60 lines.
 5. `tests/` — end-to-end: note→find round-trip, retract removes from find,
    malformed-line skip, empty-notebook diagnostic, id-prefix match.
+
+---
+
+## Iteration 3 outcome (second `/agent-persona` review of the built code)
+
+Three Fable-5 reviewers (geohot/conway/karpathy lenses) audited `lnb.py`. What
+they found and what changed:
+
+- **[SEVERE, fixed] Fail-open write boundary.** `note` did `record.update(extras)`
+  after setting core fields, so `note "x" type=_retract retracts=<id>` produced a
+  record that read back as a **tombstone** — one note could silently delete another
+  entry (and be consumed itself, blanking the visible notebook). Fix: reject any
+  extras key in the core/system set and reserve the `_` namespace (type + keys),
+  loudly. Precedence-flipping was rejected as insufficient (the `+_retract` sigil
+  path). Pinned by 3 regression tests.
+- **[HIGH, fixed] Silent-write on forgotten content.** `note tags=mae` logged
+  `content="tags=mae"`. Fix: parse `key=value` before the positional, so a stray
+  k=v with no content fails loudly; quoted content containing `=` (with spaces) is
+  still preserved.
+- **[MED, fixed] retract "did you mean" was id-blind** (searched prose content).
+  Now `difflib`-suggests the nearest live id and distinguishes *already retracted*
+  from *never existed*.
+- **[MED, done] Budget via one shared `parse()`** for note/find; `--help` prints
+  the module docstring (single-sourced, no duplicate USAGE block).
+- **[MED, done] Sigils:** `+type`/`--type` are canonical in docs and echo-back
+  (`+note (default)` flags a defaulted type so a shell-eaten `#decision` is
+  caught); `#` stays parsed but undocumented ("liberal input, strict docs").
+- **[LOW, done] Footgun:** id-fragment lookup now requires a digit, so hex-words
+  ("dead", "cafe") stay content searches; ambiguous fragments list matches.
+- **Kept (unanimous do-not-change):** single `scan()` read path, fsync single-line
+  append, per-writer JSONL, tombstone retract, throwaway `:memory:` `sql`.
+
+Result: 30 passing tests, `deps=[]`, ~305 SLOC / 4 concepts.

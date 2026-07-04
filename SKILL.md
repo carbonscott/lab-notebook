@@ -35,7 +35,12 @@ append-only, so a wrong entry stays as history.
 
    Extra fields are `key=value` args (e.g. `gpu_hours=12`). Prefer `--type`/
    `--context` flags in scripted calls — the `+type`/`@context` sigils are for
-   humans typing at the shell.
+   humans typing at the shell. `key=value` may not reuse the fields lnb owns
+   (`id`, `ts`, `writer`, `context`, `type`, `content`) or start with `_`; lnb
+   rejects those, so just use `--context`/`--type` for those.
+
+   After logging, **surface the echoed entry id** to the user (the `noted <id>`
+   line) — it's what a later `retract` needs.
 
 To **retract** a wrong entry, confirm the id and a reason, then:
 
