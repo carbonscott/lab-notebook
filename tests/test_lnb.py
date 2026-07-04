@@ -627,3 +627,21 @@ def test_retract_rejects_output_flag_and_does_not_retract(nb_env):
     r2 = run_lnb(["find", marker, "-o", "json"], env=nb_env)
     assert victim in r2.stdout
     assert not any(e.get("type") == "_retract" for e in read_entries(nb_env))
+
+
+def test_find_json_non_ascii_emitted_raw_not_escaped(nb_env):
+    """ensure_ascii=False (spec point 2): a non-ASCII record round-trips through
+    -o json as raw UTF-8 glyphs, NOT \\uXXXX escapes -- matching append()'s
+    on-disk encoding so the emitted line stays lossless and byte-faithful."""
+    env = dict(nb_env, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    content = "café ☕ mesure Δμ=0.3 数据"
+    r = run_lnb(["note", content], env=env)
+    assert r.returncode == 0, r.stderr
+    entry_id = parse_noted(r.stdout)["id"]
+
+    r2 = run_lnb(["find", entry_id, "-o", "json"], env=env)
+    assert r2.returncode == 0, r2.stderr
+    line = r2.stdout.splitlines()[0]
+    assert "café ☕" in line and "数据" in line   # raw glyphs, present verbatim
+    assert "\\u" not in line                       # NOT ascii-escaped
+    assert json.loads(line)["content"] == content  # lossless round-trip

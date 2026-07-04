@@ -8,7 +8,7 @@ scan (~10^5 entries), the reviewable next rung is `lnb sql`, which rebuilds a
 throwaway SQLite from scratch on each call -- never a persistent cache.
 
     lnb note "content" [+type] [@context] [key=value ...]   # the whole write path
-    lnb find [terms...] [@context] [+type]                  # the whole read path
+    lnb find [terms...] [@context] [+type] [-o json]        # the whole read path
     lnb retract <id> --reason "why"
     lnb sql "SELECT ... FROM entries"                        # optional escape hatch
 
@@ -39,7 +39,7 @@ RESERVED = set(CORE) | {"retracts", "reason"}                # writers may not
 ID_RE = re.compile(r"^(?=.*\d)[0-9A-Fa-fT:+-]{3,}$")
 KV_RE = re.compile(r"^[A-Za-z_][\w.-]*=\S*$")  # key=value, no whitespace
 USAGE = ('usage: lnb note "content" [+type] [@context] [key=value ...]  |  '
-         'find [terms] [@ctx] [+type]  |  retract <id> --reason "why"  |  '
+         'find [terms] [@ctx] [+type] [-o json]  |  retract <id> --reason "why"  |  '
          'sql "SELECT ... FROM entries"')
 
 
@@ -222,7 +222,7 @@ def cmd_find(args):
     if len(terms) == 1 and not context and not ctype and ID_RE.match(terms[0]):
         hits = [e for e in rows if terms[0] in e.get("id", "")]
         if len(hits) == 1:
-            return emit_json(hits) if as_json else show_entry(hits[0])
+            return emit(hits) if as_json else show_entry(hits[0])
         if len(hits) > 1:
             warn(f"'{terms[0]}' matches {len(hits)} ids:")
             return emit(hits)
