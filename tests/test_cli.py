@@ -617,7 +617,7 @@ class TestSql:
 # ---------------------------------------------------------------------------
 
 
-def make_show_args(entry_id):
+def make_show_args(entry_id=None):
     return argparse.Namespace(id=entry_id)
 
 
@@ -698,6 +698,67 @@ class TestShow:
                 nb.get("nope-never-existed")
         finally:
             nb.close()
+
+    def test_no_arg_lists_all_entries(self, notebook, capsys):
+        cmd_emit(make_emit_args(content="alpha one"))
+        cmd_emit(make_emit_args(content="bravo two"))
+        cmd_emit(make_emit_args(content="charlie three"))
+        capsys.readouterr()  # clear emit output
+
+        cmd_show(make_show_args())
+        out = capsys.readouterr().out
+        assert "id|ts|context|type|content" in out
+        assert "alpha one" in out
+        assert "bravo two" in out
+        assert "charlie three" in out
+        assert "(3 rows)" in out
+
+    def test_no_arg_newest_first(self, notebook, capsys):
+        cmd_emit(make_emit_args(content="first alpha"))
+        id_a = _last_id_in_file(notebook, "test-writer.jsonl")
+        cmd_emit(make_emit_args(content="second bravo"))
+        id_b = _last_id_in_file(notebook, "test-writer.jsonl")
+        cmd_emit(make_emit_args(content="third charlie"))
+        id_c = _last_id_in_file(notebook, "test-writer.jsonl")
+        capsys.readouterr()  # clear emit output
+
+        cmd_show(make_show_args())
+        out = capsys.readouterr().out
+        # newest-first: C emitted last sorts before B, which sorts before A.
+        assert out.index(id_c) < out.index(id_b) < out.index(id_a)
+
+    def test_no_arg_excludes_retracted(self, notebook, capsys):
+        cmd_emit(make_emit_args(content="keep this entry"))
+        keep_id = _last_id_in_file(notebook, "test-writer.jsonl")
+        cmd_emit(make_emit_args(content="drop this entry"))
+        drop_id = _last_id_in_file(notebook, "test-writer.jsonl")
+        cmd_retract(make_retract_args(drop_id))
+        capsys.readouterr()  # clear emit/retract output
+
+        cmd_show(make_show_args())
+        out = capsys.readouterr().out
+        assert keep_id in out
+        assert drop_id not in out
+        assert "(1 row)" in out
+
+    def test_no_arg_empty_notebook(self, notebook, capsys):
+        capsys.readouterr()  # clear any prior output
+
+        cmd_show(make_show_args())
+        out = capsys.readouterr().out
+        assert "(no results)" in out
+        assert "id|ts|context|type" not in out
+
+    def test_id_arg_still_shows_single_entry(self, notebook, capsys):
+        cmd_emit(make_emit_args(content="single entry body"))
+        entry_id = _last_id_in_file(notebook, "test-writer.jsonl")
+        capsys.readouterr()  # clear emit output
+
+        cmd_show(make_show_args(entry_id))
+        out = capsys.readouterr().out
+        assert entry_id in out
+        assert "single entry body" in out
+        assert "writer_id" in out
 
 
 # ---------------------------------------------------------------------------
