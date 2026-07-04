@@ -230,8 +230,11 @@ read-only mode and never rebuilds or ingests, so pressing Tab has no side
 effects and never prints an "Index rebuilt" line. If the notebook can't be
 resolved, the schema is missing, or the index doesn't exist yet, the affected
 slot simply offers nothing (schema-only slots like `--type` still work without
-an index). Values containing spaces or shell glob characters won't complete
-cleanly — in practice contexts, types, field names, and tags are space-free.
+an index). Candidates are inserted **literally**: shell metacharacters and glob
+characters in notebook data (`*`, `$(...)`, backticks, …) are never expanded or
+executed at Tab-time. A value containing whitespace still completes as a single
+unquoted word, so it may need manual quoting — in practice contexts, types,
+field names, and tags are space-free.
 
 Completion is wired through a hidden `__complete` subcommand that the bash
 function calls; you never invoke it directly.

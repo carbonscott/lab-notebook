@@ -93,7 +93,10 @@ def _contexts():
             "WHERE context IS NOT NULL ORDER BY 1"
         ).fetchall()
         return [str(r[0]) for r in rows]
-    except sqlite3.OperationalError:
+    except sqlite3.Error:
+        # Any DB-layer error (missing table on a partial index, or a corrupt
+        # file raising the OperationalError parent DatabaseError) → offer
+        # nothing. A Tab press must never surface a traceback.
         return []
     finally:
         conn.close()
@@ -143,7 +146,9 @@ def _field_values(field):
             f"WHERE {col} IS NOT NULL ORDER BY 1"
         ).fetchall()
         return [str(r[0]) for r in rows]
-    except sqlite3.OperationalError:
+    except sqlite3.Error:
+        # See _contexts: swallow any DB-layer error (incl. the corrupt-file
+        # DatabaseError, which is OperationalError's parent) so Tab stays quiet.
         return []
     finally:
         conn.close()
@@ -157,32 +162,44 @@ def complete(words: list[str], cword: int) -> list[str]:
     """Return candidates for the word at index `cword`.
 
     `words[0]` is the program name (`lab-notebook`); `cword` indexes the word
-    being completed. Never raises: unresolvable notebook / missing schema /
-    missing index all yield [].
+    being completed. Never raises: any out-of-range `cword`, unresolvable
+    notebook, missing schema, or missing index all yield []. (The real bash
+    driver always passes an in-range COMP_CWORD, but this stays total so a
+    malformed `__complete` argv degrades to silence rather than a traceback.)
     """
     if cword <= 1:
         return SUBCOMMANDS
+    if len(words) < 2:
+        return []              # cword past the end with no subcommand typed yet
     sub = words[1]
-    cur = words[cword] if cword < len(words) else ""
-    prev = words[cword - 1] if cword >= 1 else ""
+    sub_flags = FLAGS.get(sub, [])
+    # Bounds-guard cur/prev independently — cword may point past the end (a
+    # trailing-space completion) or, defensively, anywhere.
+    cur = words[cword] if 0 <= cword < len(words) else ""
+    prev = words[cword - 1] if 0 <= cword - 1 < len(words) else ""
 
     # --- value slots first (before flag-name) ---
+    # Each value slot is gated on the triggering flag actually belonging to
+    # `sub`, matching the subcommand-scoped flag-name slot below — so a
+    # flag/subcommand mismatch (e.g. `sql --type <TAB>`) offers nothing.
+    #
     # `-f <field> = <cur>`: '=' is a bash COMP_WORDBREAK, so key/=/value are
     # separate words. Two shapes: prev=='=' (value being typed) or cur=='='
     # (empty value right after `key=`).
-    if prev == "=" and cword >= 3 and words[cword - 3] in ("-f", "--field"):
+    has_field = "-f" in sub_flags or "--field" in sub_flags
+    if has_field and prev == "=" and cword >= 3 and words[cword - 3] in ("-f", "--field"):
         return _field_values(words[cword - 2])
-    if cur == "=" and cword >= 2 and words[cword - 2] in ("-f", "--field"):
+    if has_field and cur == "=" and cword >= 2 and words[cword - 2] in ("-f", "--field"):
         return _field_values(words[cword - 1])
 
-    if prev == "--type":
+    if prev == "--type" and "--type" in sub_flags:
         return _types()
-    if prev == "--context":
+    if prev == "--context" and "--context" in sub_flags:
         return _contexts()
-    if prev in ("-f", "--field"):
+    if prev in ("-f", "--field") and has_field:
         return _field_keys()   # each ends with "="
 
     # --- flag-name slot ---
     if cur.startswith("-"):
-        return FLAGS.get(sub, [])
+        return sub_flags
     return []

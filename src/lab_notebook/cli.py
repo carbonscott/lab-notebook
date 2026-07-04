@@ -68,19 +68,30 @@ FROM entries GROUP BY context ORDER BY latest DESC;
 # hidden `__complete` subcommand at Tab-time; all completion knowledge lives in
 # Python (see complete.py), the shell stays dumb.
 #
+# Candidates are read one-per-line straight into COMPREPLY and are NEVER routed
+# through `compgen -W`. `compgen -W` re-expands every word in its list — command
+# substitution, backticks, globbing — so a candidate drawn from untrusted
+# notebook data (a context, tag, or field value like `$(rm -rf ~)` or `*`) would
+# be executed or glob-expanded the instant a user pressed Tab. Instead, a
+# `while read` loop assigns each line literally and does the prefix match in the
+# shell with a quoted pattern (`"$cur"*`), so every candidate stays inert text.
+# `read` + process substitution also keeps this working on bash 3.2 (no
+# `mapfile`).
+#
 # '=' is in bash's default COMP_WORDBREAKS, so `-f repo=ma` tokenizes to
-# `… -f repo = ma`: Python keys off the '=' token to find the field, and bash
-# completes only the post-'=' word (`ma`→`mae`), leaving `repo=` intact. The
-# `cur=="="` guard covers the empty-value case (`-f repo=<TAB>`). Passing `--`
-# before the words makes argparse treat flag-like tokens (`--type`, `-f`) as
-# positionals rather than options.
+# `… -f repo = ma`: Python keys off the '=' token to find the field, and the
+# in-shell prefix match completes only the post-'=' word (`ma`→`mae`), leaving
+# `repo=` intact. The `cur=="="` remap covers the empty-value case
+# (`-f repo=<TAB>`). Passing `--` before the words makes argparse treat
+# flag-like tokens (`--type`, `-f`) as positionals rather than options.
 BASH_COMPLETION_SCRIPT = r"""_lab_notebook_complete() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     [[ "$cur" == "=" ]] && cur=""          # '=' wordbreak: empty value after key=
-    local IFS=$'\n'
-    local candidates
-    candidates="$(lab-notebook __complete "$COMP_CWORD" -- "${COMP_WORDS[@]}" 2>/dev/null)"
-    COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
+    local line
+    COMPREPLY=()
+    while IFS= read -r line; do
+        [[ "$line" == "$cur"* ]] && COMPREPLY+=("$line")
+    done < <(lab-notebook __complete "$COMP_CWORD" -- "${COMP_WORDS[@]}" 2>/dev/null)
     # Field-key candidates end with '=' — keep the cursor attached so the value
     # can be typed immediately. Only suppress the trailing space in that case.
     if [[ ${#COMPREPLY[@]} -gt 0 && "${COMPREPLY[0]}" == *= ]]; then
@@ -351,7 +362,7 @@ def cmd___complete(args: argparse.Namespace) -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="lab-notebook",
         description="Lab notebook: append-only JSONL + SQLite query index",
@@ -446,6 +457,11 @@ def main() -> None:
     p_complete.add_argument("words", nargs="*")
     p_complete.set_defaults(func=cmd___complete)
 
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
     try:
         args.func(args)

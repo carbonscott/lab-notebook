@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import sqlite3
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -36,9 +37,11 @@ from lab_notebook.store import (
     get_notebook_dir,
     index_path,
     open_readonly,
+    _schema_newer_than_index,
 )
 from lab_notebook.complete import complete
 from lab_notebook.cli import (
+    BASH_COMPLETION_SCRIPT,
     cmd_contexts,
     cmd_emit,
     cmd_init,
@@ -1836,6 +1839,17 @@ def _seed_completion(nb_dir):
     nb.close()
 
 
+def _optional_flag_strings(subparser):
+    """Every optional flag string a subparser accepts, minus the auto -h/--help
+    (which completion deliberately does not offer)."""
+    out = set()
+    for action in subparser._actions:
+        for opt in action.option_strings:
+            if opt not in ("-h", "--help"):
+                out.add(opt)
+    return out
+
+
 class TestCompletion:
     """The hidden __complete backend (complete.complete) and its CLI wiring.
 
@@ -1963,6 +1977,143 @@ class TestCompletion:
         assert "Index rebuilt" not in captured.err
         assert "Index rebuilt" not in captured.out
         assert dbp.stat().st_mtime_ns == mtime_before   # byte-for-byte untouched
+
+    def test_completion_does_not_rebuild_stale_index(self, notebook, capsys):
+        """The read-only guarantee only has TEETH against a *stale* index.
+
+        On a fresh index the normal rebuild-capable read path wouldn't rebuild
+        either, so mtime-unchanged there proves nothing. Here we make the index
+        stale (schema.yaml newer than index.sqlite) — the exact condition under
+        which `ensure_db` rebuilds — and confirm completion instead reads it
+        untouched, then show the normal path really would have rebuilt it.
+        """
+        _seed_completion(notebook)
+        capsys.readouterr()                 # discard "Index rebuilt" from seeding
+        dbp = index_path(notebook)
+        schema_file = notebook / "schema.yaml"
+        # Bump schema.yaml comfortably past the index so it counts as stale.
+        idx_mtime = dbp.stat().st_mtime
+        os.utime(schema_file, (idx_mtime + 10, idx_mtime + 10))
+        assert _schema_newer_than_index(notebook, dbp)   # genuinely stale
+        mtime_before = dbp.stat().st_mtime_ns
+
+        # Index-backed completion must READ the stale index, never rebuild it.
+        ctx = complete(["lab-notebook", "emit", "--context"], 3)
+        vals = complete(["lab-notebook", "emit", "-f", "repo", "="], 4)
+        captured = capsys.readouterr()
+        assert "Index rebuilt" not in captured.err
+        assert dbp.stat().st_mtime_ns == mtime_before    # not rebuilt
+        assert ctx == ["alpha/one", "beta/two"]          # stale data still served
+        assert vals == ["lab", "other"]
+
+        # Teeth: the normal read path DOES rebuild the same stale index, so the
+        # assertions above genuinely distinguish read-only from rebuild-capable.
+        Notebook(notebook).query("SELECT 1").close()
+        assert "Index rebuilt" in capsys.readouterr().err
+        assert dbp.stat().st_mtime_ns != mtime_before
+
+    def test_missing_schema_returns_empty(self, notebook):
+        """dir resolves (LAB_NOTEBOOK_DIR is set) but schema.yaml is absent →
+        schema-backed slots offer nothing (the `_schema()`/`load_schema`
+        LnbError swallow path, distinct from the unresolved-dir path)."""
+        (notebook / "schema.yaml").unlink()
+        assert complete(["lab-notebook", "emit", "--type"], 3) == []
+        assert complete(["lab-notebook", "emit", "-f"], 3) == []
+        # _field_values loads the schema itself, so it degrades too
+        assert complete(["lab-notebook", "emit", "-f", "repo", "="], 4) == []
+        # subcommand slot is static and unaffected
+        assert "emit" in complete(["lab-notebook", ""], 1)
+
+    def test_field_value_long_form(self, notebook):
+        """`--field` (long form) resolves values in both wordbreak shapes, the
+        same as `-f`."""
+        _seed_completion(notebook)
+        assert complete(["lab-notebook", "emit", "--field", "repo", "="], 4) == ["lab", "other"]
+        assert complete(
+            ["lab-notebook", "emit", "--field", "repo", "=", "ot"], 5
+        ) == ["lab", "other"]
+
+    def test_value_slots_are_subcommand_scoped(self, notebook):
+        """Value slots are gated on the flag belonging to the subcommand, so a
+        flag/subcommand mismatch offers nothing — matching the flag-name slot,
+        which was already subcommand-scoped."""
+        _seed_completion(notebook)
+        # sql/retract/show declare none of --type/--context/-f
+        assert complete(["lab-notebook", "sql", "--type"], 3) == []
+        assert complete(["lab-notebook", "retract", "--context"], 3) == []
+        assert complete(["lab-notebook", "show", "-f"], 3) == []
+        assert complete(["lab-notebook", "show", "-f", "repo", "="], 4) == []
+        # emit/search still complete their real flags' values
+        assert complete(["lab-notebook", "search", "--type"], 3)
+        assert complete(["lab-notebook", "emit", "--context"], 3) == ["alpha/one", "beta/two"]
+
+    def test_complete_out_of_range_returns_empty(self, notebook):
+        """complete() is total: an out-of-range cword yields [] *without*
+        relying on cmd___complete's exception net (regression for the IndexError
+        that the blanket `except Exception` was masking)."""
+        assert complete(["lab-notebook", "emit"], 7) == []      # cword past end
+        assert complete(["lab-notebook"], 2) == []              # cword>1, no subcommand
+        assert "emit" in complete([], 0)                        # empty words, subcmd slot
+
+    def test_bash_completion_inserts_candidates_literally(self, tmp_path):
+        """Regression for the `compgen -W` RCE: a candidate containing shell
+        metacharacters must be offered as inert literal text, never expanded or
+        executed. Drives the real generated bash function with a stubbed backend
+        that returns hostile candidates."""
+        bash = shutil.which("bash")
+        if bash is None:
+            pytest.skip("bash not available")
+        sentinel = tmp_path / "PWNED"
+        payload_cmd = f"$(touch {sentinel})"
+        payload_bt = f"`touch {sentinel}`"
+        # Stub `lab-notebook` so the completion function's `__complete` call
+        # returns hostile candidates without invoking the real CLI.
+        harness = (
+            f"lab-notebook() {{ printf '%s\\n' '{payload_cmd}' '{payload_bt}' '*'; }}\n"
+            + BASH_COMPLETION_SCRIPT
+            + "\nCOMP_WORDS=(lab-notebook emit --context '')\n"
+            "COMP_CWORD=3\n"
+            "_lab_notebook_complete\n"
+            'printf "%s\\n" "${COMPREPLY[@]}"\n'
+        )
+        # Decoy files so a stray glob would visibly expand into them.
+        (tmp_path / "decoy_a.txt").write_text("")
+        (tmp_path / "decoy_b.txt").write_text("")
+        result = subprocess.run(
+            [bash, "-c", harness], cwd=tmp_path, capture_output=True, text=True
+        )
+        assert not sentinel.exists(), "candidate was executed — RCE regression!"
+        out_lines = result.stdout.splitlines()
+        assert payload_cmd in out_lines        # returned verbatim, not run
+        assert "*" in out_lines                # '*' did not glob...
+        assert "decoy_a.txt" not in out_lines  # ...into the decoy filenames
+
+    def test_completion_lists_match_parser(self):
+        """SUBCOMMANDS and FLAGS in complete.py must stay in sync with the
+        argparse parser; otherwise completion silently goes stale when a
+        subcommand or flag is added. Derive the truth from the live parser."""
+        from lab_notebook.cli import build_parser
+        from lab_notebook.complete import SUBCOMMANDS, FLAGS
+
+        parser = build_parser()
+        subactions = [
+            a for a in parser._actions
+            if isinstance(a, argparse._SubParsersAction)
+        ]
+        assert len(subactions) == 1
+        choices = subactions[0].choices          # name -> subparser
+        # User-facing subcommands are every registered name but the hidden RPC.
+        user_subs = {name for name in choices if name != "__complete"}
+        assert set(SUBCOMMANDS) == user_subs
+        # Each FLAGS entry must equal that subcommand's real optional flags.
+        for sub, flags in FLAGS.items():
+            assert set(flags) == _optional_flag_strings(choices[sub]), \
+                f"FLAGS[{sub!r}] drifted from the parser"
+        # Subcommands absent from FLAGS must genuinely have no optional flags.
+        for name in user_subs:
+            if name not in FLAGS:
+                assert _optional_flag_strings(choices[name]) == set(), \
+                    f"{name!r} has flags but no FLAGS entry"
 
     # -- CLI wiring --
 
