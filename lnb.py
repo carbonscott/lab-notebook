@@ -8,7 +8,7 @@ scan (~10^5 entries), the reviewable next rung is `lnb sql`, which rebuilds a
 throwaway SQLite from scratch on each call -- never a persistent cache.
 
     lnb note "content" [+type] [@context] [key=value ...]   # the whole write path
-    lnb find [terms...] [@context] [+type]                  # the whole read path
+    lnb find [terms...] [@context] [+type] [-o json]        # the whole read path
     lnb retract <id> --reason "why"
     lnb sql "SELECT ... FROM entries"                        # optional escape hatch
 
@@ -39,7 +39,7 @@ RESERVED = set(CORE) | {"retracts", "reason"}                # writers may not
 ID_RE = re.compile(r"^(?=.*\d)[0-9A-Fa-fT:+-]{3,}$")
 KV_RE = re.compile(r"^[A-Za-z_][\w.-]*=\S*$")  # key=value, no whitespace
 USAGE = ('usage: lnb note "content" [+type] [@context] [key=value ...]  |  '
-         'find [terms] [@ctx] [+type]  |  retract <id> --reason "why"  |  '
+         'find [terms] [@ctx] [+type] [-o json]  |  retract <id> --reason "why"  |  '
          'sql "SELECT ... FROM entries"')
 
 
@@ -141,20 +141,22 @@ def new_record(now, **fields):
 # --- one arg grammar, shared by note & find ---------------------------------
 
 def parse(args):
-    """-> (positionals, ctype, context, extras). Sigils +type/#type/@context,
-    flags --type/--context, key=value -> extras, everything else positional."""
-    positionals, ctype, context, extras = [], None, None, {}
+    """-> (positionals, ctype, context, extras, output). Sigils +type/#type/@context,
+    flags --type/--context/-o/--output, key=value -> extras, everything else positional."""
+    positionals, ctype, context, extras, output = [], None, None, {}, None
     i = 0
     while i < len(args):
         a = args[i]
-        if a in ("--type", "--context"):
+        if a in ("--type", "--context", "-o", "--output"):
             if i + 1 >= len(args):
                 die(f"{a} needs a value.\n{USAGE}")
             i += 1
             if a == "--type":
                 ctype = args[i]
-            else:
+            elif a == "--context":
                 context = args[i]
+            else:
+                output = args[i]
         elif a[:1] in "+#" and len(a) > 1:
             ctype = a[1:]
         elif a[:1] == "@" and len(a) > 1:
@@ -167,13 +169,15 @@ def parse(args):
         else:
             die(f"unexpected argument: {a!r}\n{USAGE}")
         i += 1
-    return positionals, ctype, context, extras
+    return positionals, ctype, context, extras, output
 
 
 # --- commands ---------------------------------------------------------------
 
 def cmd_note(args):
-    positionals, ctype, context, extras = parse(args)
+    positionals, ctype, context, extras, output = parse(args)
+    if output is not None:
+        die("note has no -o/--output; use `find <id> -o json` to fetch a record as JSON")
     content = " ".join(positionals)
     if not content:
         die(f'nothing to log.\n{USAGE}')
@@ -198,7 +202,11 @@ def cmd_note(args):
 
 
 def cmd_find(args):
-    terms, ctype, context, _ = parse(args)
+    terms, ctype, context, _, output = parse(args)
+    if output is not None and output != "json":
+        die(f"unknown output format {output!r} -- the only format is: json")
+    as_json = output == "json"
+    emit = emit_json if as_json else print_table
     nbdir = find_notebook()
     if nbdir is None:
         print('no notebook found here. Start one with:  lnb note "..."',
@@ -214,10 +222,10 @@ def cmd_find(args):
     if len(terms) == 1 and not context and not ctype and ID_RE.match(terms[0]):
         hits = [e for e in rows if terms[0] in e.get("id", "")]
         if len(hits) == 1:
-            return show_entry(hits[0])
+            return emit(hits) if as_json else show_entry(hits[0])
         if len(hits) > 1:
             warn(f"'{terms[0]}' matches {len(hits)} ids:")
-            return print_table(hits)
+            return emit(hits)
         # 0 id hits -> fall through and treat it as a content search
 
     live = rows
@@ -238,7 +246,7 @@ def cmd_find(args):
         return no_matches(rows, terms, context, ctype)
     if not terms and not context and not ctype:
         live = live[-10:]  # default view: 10 most recent, oldest->newest
-    print_table(live)
+    emit(live)
 
 
 def cmd_retract(args):
@@ -249,6 +257,8 @@ def cmd_retract(args):
         if a == "--reason":
             i += 1
             reason = args[i] if i < len(args) else None
+        elif a in ("-o", "--output"):
+            die("retract has no -o/--output; use `find <id> -o json` to fetch a record as JSON")
         elif target is None:
             target = a
         i += 1
@@ -300,6 +310,11 @@ def cmd_sql(args):
 
 
 # --- rendering, diagnostics & helpers ---------------------------------------
+
+def emit_json(rows):
+    for e in rows:                      # JSONL: one verbatim record per line
+        print(json.dumps(e, ensure_ascii=False))
+
 
 def print_table(rows):
     for e in rows:
