@@ -35,7 +35,9 @@ from lab_notebook.store import (
     generate_id,
     get_notebook_dir,
     index_path,
+    open_readonly,
 )
+from lab_notebook.complete import complete
 from lab_notebook.cli import (
     cmd_contexts,
     cmd_emit,
@@ -1811,3 +1813,183 @@ class TestNotebookApi:
     def test_init_missing_schema_raises(self, tmp_path):
         with pytest.raises(LnbError):
             Notebook(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# shell completion
+# ---------------------------------------------------------------------------
+
+
+def _seed_completion(nb_dir):
+    """Emit a few entries with distinct/overlapping field values and build the
+    index (via a read), so index-backed completion has real data to return.
+
+    - contexts: alpha/one (twice → tests DISTINCT), beta/two
+    - repo:     lab (twice), other
+    - tags:     [a, b], [b, c] → flattened distinct {a, b, c}
+    """
+    nb = Notebook(nb_dir)
+    nb.emit("alpha/one", "observation", "c1", fields={"repo": "lab", "tags": "a,b"})
+    nb.emit("alpha/one", "decision", "c2", fields={"repo": "lab"})
+    nb.emit("beta/two", "observation", "c3", fields={"repo": "other", "tags": "b,c"})
+    nb.query("SELECT 1")  # ensure_db builds the index from the JSONL
+    nb.close()
+
+
+class TestCompletion:
+    """The hidden __complete backend (complete.complete) and its CLI wiring.
+
+    Completion resolves everything live from the target notebook and is strictly
+    read-only: it must never build or rebuild index.sqlite.
+    """
+
+    # -- subcommand slot --
+
+    def test_subcommand_slot(self, notebook):
+        out = complete(["lab-notebook", ""], 1)
+        for name in ("init", "emit", "contexts", "completion"):
+            assert name in out
+        assert "__complete" not in out       # internal RPC target stays hidden
+
+    def test_subcommand_slot_at_cword_zero(self, notebook):
+        # Defensive: even cword 0 (the program name itself) yields subcommands.
+        assert "emit" in complete(["lab-notebook"], 0)
+
+    # -- --type value slot --
+
+    def test_type_values(self, notebook):
+        expected = {"observation", "decision", "dead-end", "question", "milestone"}
+        # trailing-space style: cword == len(words), current word is empty
+        assert set(complete(["lab-notebook", "emit", "--type"], 3)) == expected
+        # mid-command, empty current word present as a token
+        mid = complete(["lab-notebook", "emit", "--context", "x", "--type", ""], 5)
+        assert set(mid) == expected
+
+    # -- --context value slot --
+
+    def test_context_values_sorted_deduped(self, notebook):
+        _seed_completion(notebook)
+        ctx = complete(["lab-notebook", "emit", "--context"], 3)
+        assert ctx == ["alpha/one", "beta/two"]   # sorted, alpha/one deduped
+        # search also completes --context from the same source
+        ctx2 = complete(["lab-notebook", "search", "--context", ""], 3)
+        assert ctx2 == ["alpha/one", "beta/two"]
+
+    # -- -f field-key slot --
+
+    def test_field_keys_end_with_equals_and_include_builtin(self, notebook):
+        keys = complete(["lab-notebook", "emit", "-f"], 3)
+        assert keys and all(k.endswith("=") for k in keys)
+        assert "artifacts=" in keys          # built-in field is offered
+        assert "repo=" in keys and "tags=" in keys
+        # long form completes the same
+        assert complete(["lab-notebook", "emit", "--field"], 3) == keys
+
+    # -- -f field=value slot (both wordbreak shapes) --
+
+    def test_field_value_both_shapes(self, notebook):
+        _seed_completion(notebook)
+        # cur == "=" shape: `emit -f repo=<TAB>` → [..., -f, repo, =], cword on "="
+        empty = complete(["lab-notebook", "emit", "-f", "repo", "="], 4)
+        assert empty == ["lab", "other"]
+        # prev == "=" shape: `emit -f repo=ot<TAB>` → [..., -f, repo, =, ot]
+        # backend returns all distinct values; bash/compgen does the prefix filter
+        typed = complete(["lab-notebook", "emit", "-f", "repo", "=", "ot"], 5)
+        assert typed == ["lab", "other"]
+
+    def test_list_field_value_flattened(self, notebook):
+        _seed_completion(notebook)
+        tags = complete(["lab-notebook", "emit", "-f", "tags", "="], 4)
+        assert tags == ["a", "b", "c"]       # JSON arrays flattened + deduped
+
+    def test_field_value_unknown_field_returns_empty(self, notebook):
+        _seed_completion(notebook)
+        # A name that is not a declared field never reaches column interpolation.
+        assert complete(["lab-notebook", "emit", "-f", "bogus", "="], 4) == []
+
+    # -- flag-name slot --
+
+    def test_flag_name_slot(self, notebook):
+        flags = complete(["lab-notebook", "emit", "-"], 2)
+        for f in ("--context", "--type", "--artifacts", "-f", "--field", "--extra"):
+            assert f in flags
+        assert set(complete(["lab-notebook", "search", "-"], 2)) == {"--context", "--type"}
+
+    # -- graceful degradation --
+
+    def test_unresolved_dir_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("LAB_NOTEBOOK_DIR", raising=False)
+        workdir = tmp_path / "empty"
+        workdir.mkdir()
+        monkeypatch.chdir(workdir)          # no schema, no index, no .lnb.env above
+        assert complete(["lab-notebook", "emit", "--type"], 3) == []
+        assert complete(["lab-notebook", "emit", "--context"], 3) == []
+        assert complete(["lab-notebook", "emit", "-f"], 3) == []
+        assert complete(["lab-notebook", "emit", "-f", "repo", "="], 4) == []
+        # subcommand slot is static and still works with no notebook
+        assert "emit" in complete(["lab-notebook", ""], 1)
+
+    def test_missing_index_returns_empty_and_creates_nothing(self, notebook):
+        dbp = index_path(notebook)
+        assert not dbp.exists()             # fixture inits but never reads/indexes
+        # schema-backed slots still work (no index needed)
+        assert complete(["lab-notebook", "emit", "--type"], 3)
+        assert complete(["lab-notebook", "emit", "-f"], 3)
+        # index-backed slots return [] and must NOT create the index
+        assert complete(["lab-notebook", "emit", "--context"], 3) == []
+        assert complete(["lab-notebook", "emit", "-f", "repo", "="], 4) == []
+        assert not dbp.exists()
+
+    def test_open_readonly_missing_returns_none(self, tmp_path):
+        assert open_readonly(tmp_path) is None
+
+    def test_completion_never_rebuilds_existing_index(self, notebook, capsys):
+        _seed_completion(notebook)
+        capsys.readouterr()                 # discard "Index rebuilt" from seeding
+        dbp = index_path(notebook)
+        assert dbp.exists()
+        mtime_before = dbp.stat().st_mtime_ns
+        # exercise every completion path against the live index
+        complete(["lab-notebook", ""], 1)
+        complete(["lab-notebook", "emit", "--type"], 3)
+        complete(["lab-notebook", "emit", "--context"], 3)
+        complete(["lab-notebook", "search", "--context"], 3)
+        complete(["lab-notebook", "emit", "-f"], 3)
+        complete(["lab-notebook", "emit", "-f", "repo", "="], 4)
+        complete(["lab-notebook", "emit", "-f", "tags", "="], 4)
+        complete(["lab-notebook", "emit", "-f", "repo", "=", "ot"], 5)
+        complete(["lab-notebook", "emit", "-"], 2)
+        captured = capsys.readouterr()
+        assert "Index rebuilt" not in captured.err
+        assert "Index rebuilt" not in captured.out
+        assert dbp.stat().st_mtime_ns == mtime_before   # byte-for-byte untouched
+
+    # -- CLI wiring --
+
+    def test_cmd_completion_prints_bash_script(self, monkeypatch, capsys):
+        monkeypatch.setattr("sys.argv", ["lab-notebook", "completion", "bash"])
+        main()
+        out = capsys.readouterr().out
+        assert "complete -F _lab_notebook_complete" in out
+        assert "_lab_notebook_complete()" in out
+
+    def test_complete_subcommand_end_to_end(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "sys.argv", ["lab-notebook", "__complete", "1", "--", "lab-notebook", ""]
+        )
+        main()
+        printed = capsys.readouterr().out.split()
+        assert "emit" in printed and "completion" in printed
+        assert "__complete" not in printed
+
+    def test_complete_never_raises_on_garbage(self, monkeypatch, capsys):
+        # cword far out of range: cmd___complete must swallow, print nothing, not raise
+        monkeypatch.setattr(
+            "sys.argv", ["lab-notebook", "__complete", "99", "--", "lab-notebook", "emit"]
+        )
+        main()
+        assert capsys.readouterr().out == ""
+        # empty word list is also fine (falls back to the subcommand slot)
+        monkeypatch.setattr("sys.argv", ["lab-notebook", "__complete", "0", "--"])
+        main()
+        assert "emit" in capsys.readouterr().out.split()
