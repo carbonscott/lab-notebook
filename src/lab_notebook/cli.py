@@ -240,8 +240,11 @@ def cmd_show(args: argparse.Namespace) -> None:
     # No id: list every live entry as a compact table, newest first. Retracted
     # entries are already absent from the index, so the listing is live-only.
     # The `AS content` alias makes the header read `content` rather than the
-    # raw `substr(...)` expression; the `rowid DESC` tiebreak keeps ordering
-    # stable (newest last-ingested first) when two entries share a timestamp.
+    # raw `substr(...)` expression. `ts` is second-resolution, so `rowid DESC`
+    # is a deterministic tiebreak for entries sharing a timestamp (not a true
+    # sub-second clock: same-second emits across writers order by ingest, which
+    # need not match wall-clock) — this just keeps the output stable and
+    # repeatable rather than planner-dependent.
     if args.id is None:
         nb = Notebook(get_notebook_dir())
         try:
