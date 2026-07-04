@@ -4,3 +4,6 @@ uv.lock
 # Agent-workflow scratch dirs (handoff docs, review reports) — not part of the package
 handoffs/
 reports/
+# Goal contracts/ledgers and design notes — local scratch, not part of the package
+.goal/
+design/
