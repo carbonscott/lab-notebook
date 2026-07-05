@@ -7,3 +7,4 @@ reports/
 # Goal contracts/ledgers and design notes — local scratch, not part of the package
 .goal/
 design/
+.play/
