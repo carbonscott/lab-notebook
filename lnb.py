@@ -34,9 +34,6 @@ from datetime import datetime
 
 CORE = ("id", "ts", "writer", "context", "type", "content")  # lnb sets these
 RESERVED = set(CORE) | {"retracts", "reason"}                # writers may not
-# An id fragment: hex/timestamp charset AND at least one digit, so plain
-# hex-lookalike words ("cafe", "dead") stay content searches, not id lookups.
-ID_RE = re.compile(r"^(?=.*\d)[0-9A-Fa-fT:+-]{3,}$")
 KV_RE = re.compile(r"^[A-Za-z_][\w.-]*=\S*$")  # key=value, no whitespace
 USAGE = ('usage: lnb note "content" [+type] [@context] [key=value ...]  |  '
          'log  |  retract <id> --reason "why"')
@@ -272,44 +269,6 @@ def cmd_retract(args):
 def emit_json(rows):
     for e in rows:                      # JSONL: one verbatim record per line
         print(json.dumps(e, ensure_ascii=False))
-
-
-def print_table(rows):
-    for e in rows:
-        content = (e.get("content") or "").replace("\n", " ")
-        if len(content) > 80:
-            content = content[:77] + "..."
-        print(f'{e.get("id",""):<26} {e.get("ts","")[:19]:<19} '
-              f'@{e.get("context",""):<16} +{e.get("type",""):<12} {content}')
-
-
-def show_entry(e):
-    width = max(len(k) for k in list(e.keys()) + list(CORE))
-    for k in CORE:
-        if k in e:
-            print(f"{k:<{width}}  {e[k]}")
-    for k, v in e.items():
-        if k not in CORE:
-            print(f"{k:<{width}}  {v}")
-
-
-def no_matches(rows, terms, context, ctype):
-    """Diagnose -> hypothesize -> prescribe (Conway): say what DOES exist."""
-    q = " ".join(terms)
-    filt = (f" @{context}" if context else "") + (f" +{ctype}" if ctype else "")
-    print(f'no matches for "{q}"{filt} '
-          f'({len(rows)} entries, {len({e.get("context") for e in rows})} contexts).',
-          file=sys.stderr)
-    if context and not any(e.get("context") == context for e in rows):
-        print(f"  contexts present: {vocab(rows, 'context')}", file=sys.stderr)
-    if ctype and not any(e.get("type") == ctype for e in rows):
-        print(f"  types present: {vocab(rows, 'type')}", file=sys.stderr)
-    print("Fewer terms usually helps, or drop the @context/+type filter.",
-          file=sys.stderr)
-
-
-def vocab(rows, field):
-    return ", ".join(sorted({str(e.get(field)) for e in rows if e.get(field)}))
 
 
 def suggest_id(target, rows):
