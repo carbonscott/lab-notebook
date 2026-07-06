@@ -39,8 +39,7 @@ RESERVED = set(CORE) | {"retracts", "reason"}                # writers may not
 ID_RE = re.compile(r"^(?=.*\d)[0-9A-Fa-fT:+-]{3,}$")
 KV_RE = re.compile(r"^[A-Za-z_][\w.-]*=\S*$")  # key=value, no whitespace
 USAGE = ('usage: lnb note "content" [+type] [@context] [key=value ...]  |  '
-         'find [terms] [@ctx] [+type] [-o json]  |  retract <id> --reason "why"  |  '
-         'sql "SELECT ... FROM entries"')
+         'log  |  retract <id> --reason "why"')
 
 
 # --- notebook discovery & identity ------------------------------------------
@@ -89,12 +88,17 @@ def default_context():
 # --- the single read path & the single write path ---------------------------
 
 def scan(nbdir):
-    """Scan every .lnb/*.jsonl -> (live entries by ts, retracted id set).
+    """Scan every .lnb/*.jsonl -> (all records incl. `_retract` tombstones,
+    ascending by ts string; the retracted id set).
 
-    Fails closed per line: a malformed/partial line is skipped with a warning,
-    never crashes a read and is never rewritten.
+    `log` wants the raw log verbatim; `retract` uses the `retracted` set to
+    own its own liveness guard. Fails closed per line: a malformed/partial line
+    is skipped with a warning, never crashes a read and is never rewritten.
+    Sorts on the ISO ts STRING -- assumes a stable UTC offset (a single-
+    timezone notebook); cross-offset instant ordering is a documented
+    limitation, not a tested guarantee.
     """
-    entries, retracted = [], set()
+    records, retracted = [], set()
     for path in sorted(glob.glob(os.path.join(nbdir, "*.jsonl"))):
         try:
             with open(path, encoding="utf-8") as fh:
@@ -107,16 +111,13 @@ def scan(nbdir):
                     except json.JSONDecodeError:
                         warn(f"skipping malformed line {os.path.basename(path)}:{lineno}")
                         continue
-                    if rec.get("type") == "_retract":
-                        if rec.get("retracts"):
-                            retracted.add(rec["retracts"])
-                    else:
-                        entries.append(rec)
+                    records.append(rec)                        # every record, verbatim
+                    if rec.get("type") == "_retract" and rec.get("retracts"):
+                        retracted.add(rec["retracts"])
         except OSError as e:
             warn(f"cannot read {path}: {e}")
-    live = sorted((e for e in entries if e.get("id") not in retracted),
-                  key=lambda e: e.get("ts", ""))
-    return live, retracted
+    records = sorted(records, key=lambda e: e.get("ts", ""))    # ascending, no reverse=
+    return records, retracted
 
 
 def append(nbdir, record):
@@ -201,52 +202,24 @@ def cmd_note(args):
     print(f'  {content}')
 
 
-def cmd_find(args):
-    terms, ctype, context, _, output = parse(args)
-    if output is not None and output != "json":
-        die(f"unknown output format {output!r} -- the only format is: json")
-    as_json = output == "json"
-    emit = emit_json if as_json else print_table
+def cmd_log(args):
+    """Emit every record as JSONL, ascending by ts -- entries AND `_retract`
+    tombstones, uncapped, verbatim. No filter, no id-lookup, no diagnostics:
+    all selection (including liveness) is jq's job. A stray argument is a
+    fail-closed usage error, never a silent filter."""
+    if args:
+        die(f"log takes no arguments -- it emits every record; filter with jq.\n{USAGE}")
     nbdir = find_notebook()
     if nbdir is None:
         print('no notebook found here. Start one with:  lnb note "..."',
               file=sys.stderr)
         return
-    rows, _ = scan(nbdir)
-    if not rows:
+    records, _ = scan(nbdir)
+    if not records:
         print(f'notebook at {nbdir} is empty -- nothing logged yet.\n'
               f'Start with:  lnb note "..."', file=sys.stderr)
         return
-
-    # A single id-ish term -> that entry in full (unique), or list the matches.
-    if len(terms) == 1 and not context and not ctype and ID_RE.match(terms[0]):
-        hits = [e for e in rows if terms[0] in e.get("id", "")]
-        if len(hits) == 1:
-            return emit(hits) if as_json else show_entry(hits[0])
-        if len(hits) > 1:
-            warn(f"'{terms[0]}' matches {len(hits)} ids:")
-            return emit(hits)
-        # 0 id hits -> fall through and treat it as a content search
-
-    live = rows
-    if context:
-        live = [e for e in live if e.get("context") == context]
-    if ctype:
-        live = [e for e in live if e.get("type") == ctype]
-    if terms:
-        query = " ".join(terms)
-        try:
-            pat = re.compile(query, re.IGNORECASE)
-            live = [e for e in live if pat.search(e.get("content", ""))]
-        except re.error:
-            q = query.lower()
-            live = [e for e in live if q in e.get("content", "").lower()]
-
-    if not live:
-        return no_matches(rows, terms, context, ctype)
-    if not terms and not context and not ctype:
-        live = live[-10:]  # default view: 10 most recent, oldest->newest
-    emit(live)
+    emit_json(records)
 
 
 def cmd_retract(args):
@@ -270,16 +243,23 @@ def cmd_retract(args):
     nbdir = find_notebook()
     if nbdir is None:
         die('no notebook here.  (nothing to retract)')
-    rows, retracted = scan(nbdir)
-    hits = [e for e in rows if e.get("id") == target] or \
-           [e for e in rows if target in e.get("id", "")]
+    records, retracted = scan(nbdir)
+    # scan() now returns tombstones and dead entries too, so retract must own
+    # its liveness: only REAL, still-live entries are retractable candidates.
+    # Both guards matter -- `type != "_retract"` stops a substring `target`
+    # from matching a tombstone's own id ("retract a tombstone"); `id not in
+    # retracted` stops a second tombstone for an already-dead id.
+    live = [e for e in records
+            if e.get("type") != "_retract" and e.get("id") not in retracted]
+    hits = [e for e in live if e.get("id") == target] or \
+           [e for e in live if target in e.get("id", "")]
     if len(hits) > 1:
         die(f"'{target}' is ambiguous -- matches {len(hits)}: "
             f"{', '.join(e['id'] for e in hits)}. Use a longer id.")
     if not hits:
         if any(target == r or target in r for r in retracted):
             die(f"'{target}' is already retracted.")
-        die(f"no entry '{target}'.{suggest_id(target, rows)}")
+        die(f"no entry '{target}'.{suggest_id(target, live)}")
 
     entry = hits[0]
     append(nbdir, new_record(datetime.now().astimezone(),
@@ -358,7 +338,7 @@ def main(argv=None):
         print(__doc__)
         return 0
     cmd, rest = argv[0], argv[1:]
-    dispatch = {"note": cmd_note, "find": cmd_find,
+    dispatch = {"note": cmd_note, "log": cmd_log,
                 "retract": cmd_retract}
     if cmd not in dispatch:
         die(f"unknown command {cmd!r}.\n{USAGE}")
