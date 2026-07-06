@@ -1,16 +1,31 @@
 #!/usr/bin/env python3
-"""Minimal lab notebook: a git-tracked, append-only log you scan.
+"""Minimal lab notebook: a git-tracked, append-only JSONL log. lnb is the
+PRODUCER; jq is the CONSUMER.
 
 A notebook is not a database to configure. It is a directory of per-writer
-JSONL files under `.lnb/`. Writing appends one JSON line; every read is a scan
-of every line. No index, no schema, no config. When the notebook outgrows a
-scan (~10^5 entries), the reviewable next rung is `lnb sql`, which rebuilds a
-throwaway SQLite from scratch on each call -- never a persistent cache.
+JSONL files under `.lnb/`. `note` appends one well-formed JSON line; `log`
+emits every line; `retract` appends a tombstone. No index, no schema, no
+config. lnb's whole job is making it easy to *write* good JSONL -- reading,
+filtering, projecting and aggregating are jq's job over the stream `log` emits.
 
-    lnb note "content" [+type] [@context] [key=value ...]   # the whole write path
-    lnb find [terms...] [@context] [+type] [-o json]        # the whole read path
-    lnb retract <id> --reason "why"
-    lnb sql "SELECT ... FROM entries"                        # optional escape hatch
+    lnb note "content" [+type] [@context] [key=value ...]   # append one record
+    lnb log     # emit ALL records as JSONL, ascending by ts; jq is the read path
+    lnb retract <id> --reason "why"                         # append a tombstone
+
+`log` is a literal, argument-free emitter: it prints every record verbatim --
+entries AND `_retract` tombstones -- uncapped, oldest first. It runs no filter
+and no id-lookup; ALL selection, including liveness, is jq's. It exits 0 on an
+empty or absent notebook (a stderr onboarding nudge only) and fails closed on
+any argument. Most-recent-first is a consumer step: `| tac` or `| tail`.
+
+    # filter by type -- jq does the selecting:
+    lnb log | jq 'select(.type=="decision")'
+
+    # the one canonical live view -- drop tombstones and the entries they retract:
+    lnb log | jq -s 'map(select(.type=="_retract").retracts) as $dead
+      | .[] | select(.type != "_retract" and (.id | IN($dead[]) | not))'
+    # naive filters are FAIL-OPEN: `lnb log | jq 'select(.type=="decision")'`
+    # returns RETRACTED decisions too -- compose the live view first.
 
 Type defaults to "note"; context defaults to the git repo name. Both are
 overridable: +type / @context sigils (shell-safe), or --type / --context flags
@@ -18,6 +33,9 @@ for scripts. (`#type` is also parsed, but `#` is the shell comment char, so it
 vanishes unquoted -- prefer `+type`.) Any key=value becomes an entry field,
 unvalidated: a typo'd key silently becomes a new field. The notebook trusts its
 writers -- except at the write boundary, which is fail-closed (see cmd_note).
+
+`log` sorts on the ISO ts STRING and assumes a stable UTC offset (a single-
+timezone notebook); cross-offset instant ordering is a documented limitation.
 
 Discovery: $LNB_DIR, else the nearest `.lnb/` walking up from the cwd, else
 `./.lnb` is created on the first `note`. Writer: $LNB_WRITER, else $USER.
