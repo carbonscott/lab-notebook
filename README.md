@@ -1,306 +1,87 @@
-# lab-notebook
+# lnb — minimal lab notebook
 
-Append-only lab notebook for tracking research across multiple repos.
-JSONL files are the git-tracked source of truth. SQLite + FTS5 is a
-disposable query index rebuilt on demand. Schema is configurable via
-`schema.yaml`.
+A git-tracked, append-only research notebook. **lnb is a JSONL producer; `jq`
+is the consumer.** A notebook is not a database to configure; it is a directory
+of JSONL files you scan. One file, `lnb.py`, stdlib only, no index, no schema,
+no config, no dependencies.
 
-## Installation
+> This is the experimental *minimal* line (`dev-min`), distilled from the full
+> `lab-notebook` via a three-persona design review. See `design/`.
 
-```bash
-# From GitHub
-uv tool install git+https://github.com/carbonscott/lab-notebook
-
-# From a local clone
-uv tool install /path/to/lab-notebook
-
-# Or with pip
-pip install git+https://github.com/carbonscott/lab-notebook
-```
-
-To update after code changes:
+## Install
 
 ```bash
-uv tool install --force git+https://github.com/carbonscott/lab-notebook
+uv tool install .        # or: pipx install .
+# or just run it: python3 lnb.py ...
 ```
 
-## Claude Code skill
-
-This repo ships the Claude Code skill that powers the `/lnb` slash command at
-[`skill/SKILL.md`](skill/SKILL.md). It wraps the CLI with guided flows for
-logging, recalling, and retracting entries. The skill is the agent-facing
-surface of this CLI and is kept in sync with it here (rather than in a separate
-repo), so a change to the CLI's command surface should update `skill/SKILL.md`
-in the same PR.
-
-To use it locally, symlink it into your skills directory:
+## Use
 
 ```bash
-ln -sfn "$(pwd)/skill" ~/.claude/skills/lab-notebook-skill
+# Log a thought. Context defaults to the git repo name; type defaults to "note".
+lnb note "MAE with 75% masking spends most capacity on background" \
+    --type observation @ssl/pretraining tags=mae,masking
+
+# Read: `log` emits the WHOLE notebook as JSONL (oldest first); jq selects.
+lnb log                                       # every record, one JSON per line
+lnb log | jq 'select(.type=="decision")'      # filter by type
+lnb log | jq 'select(.content|test("masking";"i"))'   # regex over content
+lnb log | jq 'select(.context=="ssl/pretraining")'    # filter by context
+
+# The ONE canonical LIVE view -- drop tombstones and the entries they retract
+# (also printed by `lnb --help`; naive filters above are fail-open on this):
+lnb log | jq -s 'map(select(.type=="_retract").retracts) as $dead
+  | .[] | select(.type != "_retract" and (.id | IN($dead[]) | not))'
+
+# Retract (logical, append-only): writes a tombstone; the original line stays.
+lnb retract 20260704T163806-73caceb5 --reason "superseded"
 ```
 
-The install directory name (`lab-notebook-skill`) is independent of the skill's
-internal `name: lnb` in `skill/SKILL.md` — that `name` is what powers the `/lnb`
-command, so the two differing is expected.
+`lnb log` is uncapped and takes no arguments -- for a short view, pipe to
+`| tail` (or `| tac` for most-recent-first).
 
-The skill calls the `lab-notebook` CLI, so install that first (see above).
+At the shell, `--type X` / `--context Y` are the safe forms. The `+type` /
+`@context` sigils are DWIM shorthands (`@` is shell-safe; quote `+`/`#` if your
+shell needs it).
 
-## Quick Start
+## Model
 
-```bash
-# 1. Initialize a project-local notebook (creates .lnb/ and .lnb.env)
-cd /path/to/my-project
-lab-notebook init
+- **Storage:** `.lnb/<writer>.jsonl` — one JSON object per line, the git-tracked
+  source of truth. Each writer gets their own file, so there are no merge
+  conflicts. Writer = `$LNB_WRITER`, else `$USER`.
+- **Discovery:** `$LNB_DIR`, else the nearest `.lnb/` walking up from the cwd,
+  else `./.lnb` is created on the first `note`.
+- **Query:** every read scans every line (milliseconds for a realistic notebook).
+  No index to build, migrate, or invalidate. `log` sorts on the ISO ts *string*
+  and assumes a stable UTC offset (a single-timezone notebook); cross-offset
+  instant ordering is a documented limitation.
+- **Retract:** appends `{"type":"_retract","retracts":<id>,"reason":...}`. `log`
+  emits **every** record, including `_retract` tombstones and the entries they
+  retract — the consumer (jq) computes liveness with the idiom lnb ships in
+  `--help`. The original entry and the tombstone both remain as the audit trail.
+  No un-retract — restore from a JSONL backup.
+- **Append is fail-closed:** one `\n`-terminated write, flushed and `fsync`ed; a
+  malformed trailing line is skipped with a warning, never rewritten.
 
-# 2. Source .lnb.env (sets LAB_NOTEBOOK_DIR and LAB_NOTEBOOK_WRITER)
-source .lnb.env
-
-# 3. Write an entry (schema fields are passed with -f KEY=VALUE)
-lab-notebook emit --context maxie/ssl-comparison --type observation \
-    -f tags=mae,masking \
-    "MAE with 75% masking spends most capacity on background."
-
-# 4. Query
-lab-notebook sql "SELECT ts, type, substr(content,1,80) FROM entries ORDER BY ts DESC LIMIT 10"
-
-# 5. Full-text search
-lab-notebook search "masking"
-```
-
-## Environment Variables
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `LAB_NOTEBOOK_DIR` | Yes | — | Path to notebook data directory |
-| `LAB_NOTEBOOK_WRITER` | No | `$USER` | Writer ID for entries |
-
-### Notebook discovery precedence
-
-When the CLI resolves which notebook to use, it checks sources in this order
-(first match wins):
-
-1. `$LAB_NOTEBOOK_DIR` environment variable (if set and non-empty)
-2. Nearest `.lnb.env` walking up from the current directory (closest wins,
-   stops at `$HOME` or `/`)
-
-Explicit `LAB_NOTEBOOK_DIR=... lab-notebook ...` always wins, so one-shot
-overrides work as expected. For normal project use, `source .lnb.env` after
-`cd`ing into a project so the env var is set for your shell.
-
-## Schema Configuration
-
-Each notebook has a `schema.yaml` that defines entry types and custom fields.
-`lab-notebook init` generates a default one. Run `lab-notebook template` to see
-bundled templates, or use `lab-notebook init --template <name>` to start with a
-specific one. To start from a schema file shipped by your own project, use
-`lab-notebook init --template-path ./my-schema.yaml`.
-
-The default template (`research-notebook`) includes basic fields. You can add
-more to your `schema.yaml`:
-
-```yaml
-types:
-  - observation
-  - decision
-  - dead-end
-  - question
-  - milestone
-
-fields:
-  repo:       {type: text}
-  branch:     {type: text}
-  tags:       {type: list}
-  dataset:    {type: text, fts: true}   # additional field
-  gpu_hours:  {type: real}              # additional field
-  num_nodes:  {type: integer}           # additional field
-```
-
-**Field types:** `text`, `integer`, `real`, `list` (list is comma-separated on
-the CLI, stored as a JSON array in JSONL).
-
-**Full-text search:** Add `fts: true` to include a field in the FTS5 index.
-`content` is always indexed.
-
-**Built-in fields:** `artifacts` is always available on `emit` (comma-separated paths, stored as a JSON array). It does not need to be declared in `schema.yaml` and cannot be redeclared.
-
-**`--extra`:** For one-off fields not in the schema, use `--extra key=value`
-(repeatable). These are stored in the JSONL and in a JSON blob column in SQLite.
-Note: extra values are always stored as strings — use schema fields for typed data.
-
-Run `lab-notebook rebuild` after changing `schema.yaml`.
-
-## Commands
-
-### `init [path] [--template NAME | --template-path PATH] [--force]`
-
-Initialize a project-local notebook. With no argument, creates `./.lnb/` in the
-current directory; given a `path`, creates the notebook at exactly that path
-(the path is used verbatim — nothing is appended). Either way the directory is
-populated with `entries/`, `artifacts/`, `schema.yaml`, and `.gitignore`. Also
-writes `.lnb.env` in the current directory for automatic notebook discovery; if
-`.lnb.env` already exists, `init` refuses unless `--force` is given. Use
-`--template` to pick a bundled schema template (default: `research-notebook`).
-Pass `--template` with no value to list available templates. Use
-`--template-path PATH` to load a schema from an arbitrary YAML file on disk
-(mutually exclusive with `--template`).
-
-### `emit --context X --type Y [--artifacts ...] [-f KEY=VALUE ...] [--extra K=V] "content"`
-
-Write a notebook entry. Required: `--context`, `--type`, content.
-Schema fields are passed with the repeatable `-f/--field KEY=VALUE` flag, e.g.
-`-f repo=lab-notebook -f tags=mae,masking` (a `list` field takes a
-comma-separated value). Field names are validated against `schema.yaml` at
-runtime: an unknown name is rejected with a hint to use `--extra` instead, and a
-non-numeric value for an `integer`/`real` field is an error. Because no schema
-is read while building the parser, `emit --help` is identical everywhere.
-
-### `retract ID --reason "why"`
-
-Forget an entry that is wrong or out of date. Both `ID` and `--reason` are
-required. Retract appends a tombstone record to the notebook — it does **not**
-edit or remove the original line. On the next indexed read the target row is
-deleted from `index.sqlite` (and from full-text search); the tombstone itself
-is never returned as an entry.
-
-Because the index is rebuilt from the JSONL, the deletion survives `rebuild`.
-The retraction is logical, not physical: the original entry and the tombstone
-(with its reason) both remain in `entries/*.jsonl` as the audit trail of what
-was forgotten and why. To recover a retracted entry, restore it from a JSONL
-backup and `rebuild` — there is no un-retract command. Any writer may retract
-any entry by id.
-
-### `show [ID]`
-
-With an id, print that entry in full — every core and schema field plus any
-`--extra` values (decoded from their JSON blob) — in a readable key/value
-layout. Empty fields render blank. Errors if the id is not in the index
-(retracted or never existed). Use it after a scan query (`SELECT id, ...`) when
-a truncated preview isn't enough.
-
-With no id, list every entry as a compact table (`id | ts | context | type |
-content`), newest first, one row per entry. Retracted entries are already
-absent from the index, so the listing is live-only. This is the quickest way to
-eyeball the whole notebook or grab an id to pass back to `show`.
-
-### `sql "query"`
-
-Run raw SQL against the index. Auto-rebuilds if `index.sqlite` is missing.
-
-### `search "query" [--context X] [--type Y]`
-
-Full-text search with optional filters.
-
-### `schema`
-
-Print table structure and example queries.
-
-### `rebuild`
-
-Regenerate `index.sqlite` from `schema.yaml` and all `entries/*.jsonl` files.
-
-### `contexts`
-
-List active research contexts with entry counts and date ranges.
-
-### `template [name] [--force]`
-
-List or apply bundled schema templates. With no argument, lists available
-templates. With a name, copies that template to the current notebook's
-`schema.yaml` (requires `--force` if `schema.yaml` already exists).
-Run `lab-notebook rebuild` afterward if entries exist.
-
-### `completion bash`
-
-Print a bash tab-completion script. Register it for the current shell with:
-
-```bash
-source <(lab-notebook completion bash)
-```
-
-Add that line to your `~/.bashrc` to enable it permanently. Once registered,
-Tab completes:
-
-| At | Completes to |
-|----|--------------|
-| `lab-notebook <TAB>` | the subcommands |
-| `emit --type <TAB>` | entry types from `schema.yaml` |
-| `emit --context <TAB>` / `search --context <TAB>` | distinct contexts already in the notebook |
-| `emit -f <TAB>` | schema field names (each as `name=`) |
-| `emit -f repo=<TAB>` | distinct existing values for that field |
-| `<subcommand> -<TAB>` | that subcommand's flags |
-
-All candidates resolve **live** from the target notebook (`schema.yaml` and
-`index.sqlite`). Completion is strictly **read-only**: it opens the index in
-read-only mode and never rebuilds or ingests, so pressing Tab has no side
-effects and never prints an "Index rebuilt" line. If the notebook can't be
-resolved, the schema is missing, or the index doesn't exist yet, the affected
-slot simply offers nothing (schema-only slots like `--type` still work without
-an index). Candidates are inserted **literally**: shell metacharacters and glob
-characters in notebook data (`*`, `$(...)`, backticks, …) are never expanded or
-executed at Tab-time. A value containing whitespace still completes as a single
-unquoted word, so it may need manual quoting — in practice contexts, types,
-field names, and tags are space-free.
-
-Completion is wired through an internal `__complete` subcommand that the bash
-function calls; you never invoke it directly.
-
-## Data Layout
-
-```
-my-project/
-├── .lnb/
-│   ├── entries/
-│   │   ├── cong.jsonl
-│   │   ├── intern-alice.jsonl
-│   │   └── agent-claude-01.jsonl
-│   ├── artifacts/        # tracked; store files referenced via --artifacts
-│   ├── schema.yaml       # field definitions and entry types
-│   ├── index.sqlite      # gitignored, rebuilt on demand
-│   └── .gitignore
-└── .lnb.env              # points to .lnb/, source this
-```
-
-Each writer gets their own JSONL file. No merge conflicts.
-
-## JSONL Format
+## Entry
 
 ```json
-{
-  "id": "20260321T143022-a7f2c3d1",
-  "ts": "2026-03-21T14:30:22-07:00",
-  "writer_id": "cong",
-  "context": "maxie/ssl-comparison",
-  "type": "observation",
-  "repo": "research-lrn091",
-  "branch": "phase0/data-loading",
-  "tags": ["mae", "masking"],
-  "artifacts": ["research-lrn091:results/S01.csv"],
-  "content": "MAE with 75% masking spends most capacity on background."
-}
+{"id":"20260704T163806-73caceb5","ts":"2026-07-04T16:38:06-07:00",
+ "writer":"cong","context":"ssl/pretraining","type":"observation",
+ "content":"MAE with 75% masking spends most capacity on background",
+ "tags":"mae,masking"}
 ```
 
-`ts` is an ISO 8601 timestamp in the writer's local time with an explicit UTC
-offset (`datetime.now().astimezone().isoformat(timespec="seconds")`), e.g.
-`2026-03-21T14:30:22-07:00`. It is stored as TEXT and `ORDER BY ts` sorts
-lexically. Entries written before this format carried a naive timestamp with no
-offset (`2026-03-21T14:30:22`); their date/time prefix still sorts correctly
-against the newer values, so day-level ordering within one machine's history is
-reliable. Cross-timezone ordering of those legacy naive entries is best-effort,
-since a naive value has no offset to normalize against. Entry `id`s keep their
-compact naive form (`YYYYMMDDThhmmss-<hex>`) and are unaffected.
+Types are free-form; common ones: `observation, decision, dead-end, question,
+milestone, note`. Any `key=value` becomes an entry field — unvalidated by design.
+Want a closed vocabulary? Wrap `lnb note` in a small validator of your own —
+lnb ships none by design.
+Values may contain spaces (quote the whole `key=value` token); a quoted arg
+beginning `key=` is a field, not content — lead with the content string.
 
-A `retract` appends a tombstone record instead of an entry. Its `type` is
-`_retract`, `retracts` is the id being forgotten, and `reason` is why. It is a
-control record — it deletes its target from the index and is never indexed as
-an entry itself:
+## The honest tradeoff
 
-```json
-{
-  "id": "20260322T091500-c3d19f4e",
-  "ts": "2026-03-22T09:15:00-07:00",
-  "writer_id": "cong",
-  "type": "_retract",
-  "retracts": "20260321T143022-a7f2c3d1",
-  "reason": "superseded by a corrected measurement"
-}
-```
+Every read is O(all entries) and nothing validates fields — fine at 10^4 entries,
+a lie at 10^7. The escalation path when a scan outgrows the terminal is not a
+second query language; it is `lnb log | jq '…'`, and for the full-power case,
+`jq` directly over `.lnb/*.jsonl`.
