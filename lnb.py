@@ -287,28 +287,6 @@ def cmd_retract(args):
     print(f'retracted {entry["id"]}  ({reason})')
 
 
-def cmd_sql(args):
-    import sqlite3
-    if not args:
-        die('usage: lnb sql "SELECT ... FROM entries"')
-    nbdir = find_notebook()
-    if nbdir is None:
-        die('no notebook here.')
-    rows, _ = scan(nbdir)
-    con = sqlite3.connect(":memory:")
-    con.execute("CREATE TABLE entries (id, ts, writer, context, type, content, extra)")
-    for e in rows:
-        extra = {k: v for k, v in e.items() if k not in CORE}
-        con.execute("INSERT INTO entries VALUES (?,?,?,?,?,?,?)",
-                    (*(e.get(c) for c in CORE), json.dumps(extra) if extra else None))
-    try:
-        cur = con.execute(" ".join(args))
-    except sqlite3.Error as e:
-        die(f"sql error: {e}")
-    for row in cur.fetchall():
-        print("\t".join("" if v is None else str(v) for v in row))
-
-
 # --- rendering, diagnostics & helpers ---------------------------------------
 
 def emit_json(rows):
@@ -381,7 +359,7 @@ def main(argv=None):
         return 0
     cmd, rest = argv[0], argv[1:]
     dispatch = {"note": cmd_note, "find": cmd_find,
-                "retract": cmd_retract, "sql": cmd_sql}
+                "retract": cmd_retract}
     if cmd not in dispatch:
         die(f"unknown command {cmd!r}.\n{USAGE}")
     dispatch[cmd](rest)
