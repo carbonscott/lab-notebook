@@ -34,7 +34,8 @@ vanishes unquoted -- prefer `+type`.) Any key=value becomes an entry field,
 unvalidated: a typo'd key silently becomes a new field. A quoted arg beginning
 `key=` is a field, not content -- lead with the content string. The notebook
 trusts its writers -- except at the write boundary, which is fail-closed (see
-cmd_note).
+cmd_note). Want a closed vocabulary? Gate `lnb note` behind a small validator
+of your own -- lnb ships none by design.
 
 `log` sorts on the ISO ts STRING and assumes a stable UTC offset (a single-
 timezone notebook); cross-offset instant ordering is a documented limitation.

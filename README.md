@@ -74,6 +74,8 @@ shell needs it).
 
 Types are free-form; common ones: `observation, decision, dead-end, question,
 milestone, note`. Any `key=value` becomes an entry field — unvalidated by design.
+Want a closed vocabulary? Wrap `lnb note` in a small validator of your own —
+lnb ships none by design.
 Values may contain spaces (quote the whole `key=value` token); a quoted arg
 beginning `key=` is a field, not content — lead with the content string.
 
