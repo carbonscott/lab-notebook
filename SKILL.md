@@ -42,7 +42,9 @@ append-only, so a wrong entry stays as history.
    lnb note "distilled content" --type decision @ssl/pretraining
    ```
 
-   Extra fields are `key=value` args (e.g. `gpu_hours=12`). Prefer `--type`/
+   Extra fields are `key=value` args (e.g. `gpu_hours=12`). Values may contain
+   spaces — quote the whole token (`"cause=two words"`), and note a quoted arg
+   beginning `key=` is a field, not content. Prefer `--type`/
    `--context` flags in scripted calls — the `+type`/`@context` sigils are for
    humans typing at the shell. `key=value` may not reuse the fields lnb owns
    (`id`, `ts`, `writer`, `context`, `type`, `content`) or start with `_`; lnb

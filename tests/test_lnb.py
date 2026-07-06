@@ -671,12 +671,31 @@ def test_note_with_only_kv_and_no_content_fails_loudly(nb_env):
     assert not writer_jsonl(nb_env).exists() or read_entries(nb_env) == []
 
 
-def test_note_content_with_equals_and_spaces_is_preserved(nb_env):
+def test_note_bare_kv_shaped_content_fails_loudly(nb_env):
+    """Since values may contain spaces, a sole quoted arg beginning `key=`
+    parses as an extra with no content -- fail loudly, don't store it."""
     r = run_lnb(["note", "lr=3e-4 gave the best val marker_eq"], env=nb_env)
+    assert r.returncode != 0
+    assert "nothing to log" in r.stderr.lower()
+    assert not writer_jsonl(nb_env).exists() or read_entries(nb_env) == []
+
+
+def test_extras_value_with_spaces(nb_env):
+    r = run_lnb(["note", "fix", "cause=two words"], env=nb_env)
     assert r.returncode == 0, r.stderr
     entry = read_entries(nb_env)[-1]
-    assert entry["content"] == "lr=3e-4 gave the best val marker_eq"
-    assert "lr" not in entry  # not misparsed as an extra
+    assert entry["cause"] == "two words"
+    assert entry["content"] == "fix"
+
+
+def test_note_content_with_equals_not_in_key_position_stays_content(nb_env):
+    """An `=` whose prefix isn't a bare key (the `:` breaks the key charset)
+    doesn't match KV_RE -- the arg stays content, verbatim."""
+    r = run_lnb(["note", "results: lr=3e-4 didn't help"], env=nb_env)
+    assert r.returncode == 0, r.stderr
+    entry = read_entries(nb_env)[-1]
+    assert entry["content"] == "results: lr=3e-4 didn't help"
+    assert "results" not in entry and "lr" not in entry
 
 
 def test_note_rejects_output_flag(nb_env):

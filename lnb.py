@@ -31,8 +31,10 @@ Type defaults to "note"; context defaults to the git repo name. Both are
 overridable: +type / @context sigils (shell-safe), or --type / --context flags
 for scripts. (`#type` is also parsed, but `#` is the shell comment char, so it
 vanishes unquoted -- prefer `+type`.) Any key=value becomes an entry field,
-unvalidated: a typo'd key silently becomes a new field. The notebook trusts its
-writers -- except at the write boundary, which is fail-closed (see cmd_note).
+unvalidated: a typo'd key silently becomes a new field. A quoted arg beginning
+`key=` is a field, not content -- lead with the content string. The notebook
+trusts its writers -- except at the write boundary, which is fail-closed (see
+cmd_note).
 
 `log` sorts on the ISO ts STRING and assumes a stable UTC offset (a single-
 timezone notebook); cross-offset instant ordering is a documented limitation.
@@ -52,7 +54,7 @@ from datetime import datetime
 
 CORE = ("id", "ts", "writer", "context", "type", "content")  # lnb sets these
 RESERVED = set(CORE) | {"retracts", "reason"}                # writers may not
-KV_RE = re.compile(r"^[A-Za-z_][\w.-]*=\S*$")  # key=value, no whitespace
+KV_RE = re.compile(r"^[A-Za-z_][\w.-]*=.*$")  # key=value; value may contain spaces
 USAGE = ('usage: lnb note "content" [+type] [@context] [key=value ...]  |  '
          'log  |  retract <id> --reason "why"')
 
