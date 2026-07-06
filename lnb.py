@@ -136,25 +136,23 @@ def new_record(now, **fields):
     return rec
 
 
-# --- one arg grammar, shared by note & find ---------------------------------
+# --- one arg grammar, used by note ------------------------------------------
 
 def parse(args):
-    """-> (positionals, ctype, context, extras, output). Sigils +type/#type/@context,
-    flags --type/--context/-o/--output, key=value -> extras, everything else positional."""
-    positionals, ctype, context, extras, output = [], None, None, {}, None
+    """-> (positionals, ctype, context, extras). Sigils +type/#type/@context,
+    flags --type/--context, key=value -> extras, everything else positional."""
+    positionals, ctype, context, extras = [], None, None, {}
     i = 0
     while i < len(args):
         a = args[i]
-        if a in ("--type", "--context", "-o", "--output"):
+        if a in ("--type", "--context"):
             if i + 1 >= len(args):
                 die(f"{a} needs a value.\n{USAGE}")
             i += 1
             if a == "--type":
                 ctype = args[i]
-            elif a == "--context":
-                context = args[i]
             else:
-                output = args[i]
+                context = args[i]
         elif a[:1] in "+#" and len(a) > 1:
             ctype = a[1:]
         elif a[:1] == "@" and len(a) > 1:
@@ -167,15 +165,13 @@ def parse(args):
         else:
             die(f"unexpected argument: {a!r}\n{USAGE}")
         i += 1
-    return positionals, ctype, context, extras, output
+    return positionals, ctype, context, extras
 
 
 # --- commands ---------------------------------------------------------------
 
 def cmd_note(args):
-    positionals, ctype, context, extras, output = parse(args)
-    if output is not None:
-        die("note has no -o/--output; use `find <id> -o json` to fetch a record as JSON")
+    positionals, ctype, context, extras = parse(args)
     content = " ".join(positionals)
     if not content:
         die(f'nothing to log.\n{USAGE}')
@@ -228,7 +224,8 @@ def cmd_retract(args):
             i += 1
             reason = args[i] if i < len(args) else None
         elif a in ("-o", "--output"):
-            die("retract has no -o/--output; use `find <id> -o json` to fetch a record as JSON")
+            die("retract has no -o/--output; it takes an <id> and --reason only. "
+                "To read records, use `lnb log`.")
         elif target is None:
             target = a
         i += 1
