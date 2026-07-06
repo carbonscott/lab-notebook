@@ -41,6 +41,14 @@ JQ_LIVE_FILTER = (
 )
 RECIPE = "lnb log | jq -s '" + JQ_LIVE_FILTER + "'"
 
+# The distinctive core of the live-view recipe. Unlike RECIPE (whose exact
+# indentation is pinned to the --help copy), these two fragments appear verbatim
+# in ALL THREE shipped copies -- lnb.py's docstring/--help, README.md and
+# SKILL.md -- so they pin the README/SKILL copies against drift. Pure text
+# presence, so this runs everywhere (no jq needed).
+RECIPE_CORE = 'select(.type != "_retract" and (.id | IN($dead[]) | not))'
+RECIPE_DEAD_BIND = 'map(select(.type=="_retract").retracts) as $dead'
+
 HAVE_JQ = shutil.which("jq") is not None
 needs_jq = pytest.mark.skipif(not HAVE_JQ, reason="jq is not installed")
 
@@ -286,6 +294,40 @@ def test_malformed_trailing_line_skipped_with_warning(nb_env):
     assert "marker8675309" in r.stdout               # good line survives
     assert "malformed" in r.stderr.lower()           # bad line diagnosed
     assert "handcrafted.jsonl:2" in r.stderr
+
+
+@pytest.mark.parametrize("scalar_line", ["42", "null", "true", '"x"', "[1,2]"])
+def test_scan_skips_non_object_json_line(nb_env, scalar_line):
+    """A line that is VALID json but NOT an object (a scalar/array) must be
+    skipped with a 'skipping non-object line' warning -- never reach rec.get()
+    and crash with an AttributeError. scan() 'fails closed per line', so both
+    reads (`log` here, and `retract`) survive. This test FAILS (traceback,
+    exit != 0) if the isinstance(rec, dict) guard is removed from scan()."""
+    nb_dir = Path(nb_env["LNB_DIR"])
+    nb_dir.mkdir(parents=True)
+    good = {
+        "id": "20260101T000000-deadbeef",
+        "ts": "2026-01-01T00:00:00+00:00",
+        "writer": "handcrafted",
+        "context": "lab-notebook-min",
+        "type": "note",
+        "content": "well formed nonobj-marker-5150",
+    }
+    # good record first, then a valid-JSON-but-non-object line.
+    (nb_dir / "handcrafted.jsonl").write_text(
+        json.dumps(good) + "\n" + scalar_line + "\n"
+    )
+    r = run_lnb(["log"], env=nb_env)
+    assert r.returncode == 0, r.stderr                # exit 0, no crash
+    assert "nonobj-marker-5150" in r.stdout           # good record still emitted
+    assert "skipping non-object line" in r.stderr     # bad line diagnosed
+    assert "handcrafted.jsonl:2" in r.stderr
+    assert "Traceback" not in r.stderr                # NEVER an uncaught traceback
+    assert "AttributeError" not in r.stderr
+    # the non-object was skipped, not emitted: every stdout line is an object.
+    objs = [json.loads(l) for l in r.stdout.splitlines() if l.strip()]
+    assert all(isinstance(o, dict) for o in objs)
+    assert len(objs) == 1
 
 
 # --- empty-notebook / no-notebook-found onboarding nudges (exit 0) -----------
@@ -558,6 +600,31 @@ def test_naive_filter_keeps_retracted_footgun(nb_env):
     assert jq.returncode == 0, jq.stderr
     ids = [json.loads(l)["id"] for l in jq.stdout.splitlines() if l.strip()]
     assert dead in ids, "naive filter returns the dead decision -- the footgun"
+
+
+def test_live_view_recipe_pinned_in_readme_and_skill():
+    """The canonical live-view jq filter ships in THREE places -- lnb.py's
+    docstring/--help (pinned by test_live_view_jq_idiom_drops_retracted),
+    README.md and SKILL.md. Pin the two doc copies too, so none can silently
+    drift from the recipe lnb actually ships. jq-independent (pure text
+    presence), so it runs everywhere."""
+    for doc in ("README.md", "SKILL.md"):
+        text = (WORKTREE / doc).read_text(encoding="utf-8")
+        assert RECIPE_DEAD_BIND in text, (
+            f"{doc} is missing the live-view $dead binding "
+            f"'{RECIPE_DEAD_BIND}' -- it drifted from the shipped recipe")
+        assert RECIPE_CORE in text, (
+            f"{doc} is missing the live-view select core '{RECIPE_CORE}' "
+            f"-- it drifted from the shipped recipe")
+
+
+def test_live_view_recipe_core_ships_in_help(nb_env):
+    """Sanity: the same core fragments this test pins in README/SKILL are the
+    ones lnb ships in --help -- so pinning the docs pins the real recipe, not a
+    fabricated string that exists only in the test."""
+    help_out = run_lnb(["--help"], env=nb_env).stdout
+    assert RECIPE_DEAD_BIND in help_out
+    assert RECIPE_CORE in help_out
 
 
 # --- fail-closed write boundary (a note may not forge system records) --------

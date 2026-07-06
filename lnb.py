@@ -126,6 +126,10 @@ def scan(nbdir):
                     except json.JSONDecodeError:
                         warn(f"skipping malformed line {os.path.basename(path)}:{lineno}")
                         continue
+                    if not isinstance(rec, dict):              # valid JSON, but a
+                        warn(f"skipping non-object line "      # scalar/array is not
+                             f"{os.path.basename(path)}:{lineno}")  # a record -- fail
+                        continue                               # closed, never crash
                     records.append(rec)                        # every record, verbatim
                     if rec.get("type") == "_retract" and rec.get("retracts"):
                         retracted.add(rec["retracts"])
