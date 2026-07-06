@@ -1,20 +1,29 @@
 ---
 name: lnb
-description: "Log and recall research notebook entries. Use when the user asks to record an observation, decision, dead-end, question, or milestone, or asks what we've tried / decided / hit. Trigger on: 'log this', 'note this', 'record', 'what have we tried', 'what did we decide', 'search the notebook'."
+description: "Record and recall research notebook entries. Use when the user asks to record an observation, decision, dead-end, question, or milestone, or asks what we've tried / decided / hit. Trigger the WRITE (Note) action on: 'note this', 'log this', 'record'. Trigger the READ (Recall) action on: 'recall', 'what have we tried', 'what did we decide', 'search the notebook'."
 user-invocable: true
-argument-hint: "<log|recall> [text...]"
+argument-hint: "<note|recall> [text...]"
 ---
 
 # Lab Notebook (`/lnb`)
 
-A git-tracked, append-only research notebook. Two verbs: **log** and **recall**.
-The CLI (`lnb`) auto-discovers the notebook (nearest `.lnb/` walking up, or
-`$LNB_DIR`) and creates one on first `log`. No setup step.
+A git-tracked, append-only research notebook. Two skill verbs: **note** (write)
+and **recall** (read). NB: the *CLI* read verb is now `lnb log` (it emits the
+whole notebook as JSONL) — so at this skill layer "log" is never a write; use
+**note**. The CLI (`lnb`) auto-discovers the notebook (nearest `.lnb/` walking
+up, or `$LNB_DIR`) and creates one on the first `note`. No setup step.
 
-Parse the first word of `$ARGUMENTS`: `log` → **Log**, `recall` → **Recall**,
-anything else → show the two usages below.
+Parse the intent of `$ARGUMENTS`. A request to record something — first word
+`note`/`log`/`record`, a phrasing like "log this"/"note this", or clearly a new
+observation/decision/dead-end → **Note** (the WRITE action; runs `lnb note …`).
+A request to recall — first word `recall`, "what did we / have we …", or a
+question about what was tried / decided → **Recall** (the READ action; runs
+`lnb log | jq …`). If ambiguous, show the two usages below. Note the split:
+the user saying "log this" means WRITE an entry (→ **Note**), whereas the *CLI*
+verb `lnb log` READS the whole notebook (see above) — at this skill layer "log"
+is never the write command, `lnb note` is.
 
-## Log
+## Note
 
 Append one entry. **Distill first, then confirm, then write** — the log is
 append-only, so a wrong entry stays as history.
@@ -50,19 +59,28 @@ lnb retract <id> --reason "superseded by a corrected measurement"
 
 ## Recall
 
-Reads are non-destructive — no confirmation needed.
+Reads are non-destructive — no confirmation needed. `lnb log` emits **all**
+entries as JSONL (oldest first, uncapped, including `_retract` tombstones); `jq`
+does every selection.
 
 ```bash
-lnb find                      # 10 most recent, newest last
-lnb find masking ratio        # case-insensitive / regex over content
-lnb find @ssl/pretraining     # filter by context
-lnb find --type dead-end      # (or +dead-end) filter by type
-lnb find a7f2c3d1             # a unique id fragment prints that entry in full
-lnb sql "SELECT type, count(*) FROM entries GROUP BY type"   # aggregates
+lnb log                                              # all entries, oldest first
+lnb log | jq 'select(.type=="dead-end")'             # filter by type
+lnb log | jq 'select(.content|test("masking";"i"))'  # regex over content
+lnb log | jq 'select(.context=="ssl/pretraining")'  # filter by context
+lnb log | jq 'select(.id|test("a7f2c3d1"))'          # fetch one entry by id
+lnb log | jq -r '[.ts,.type,.content]|@tsv'          # project to a table
+lnb log | jq -s 'group_by(.type)|map({(.[0].type):length})'  # aggregate counts
+
+# LIVE view — drop tombstones and the entries they retract (also in `lnb --help`);
+# the plain filters above are FAIL-OPEN and return retracted entries too:
+lnb log | jq -s 'map(select(.type=="_retract").retracts) as $dead
+  | .[] | select(.type != "_retract" and (.id | IN($dead[]) | not))'
 ```
 
-Present a concise answer **citing specific entries** (id, context, type). Don't
-dump raw output. If nothing matches, the CLI already suggests how to broaden —
-relay that.
+`| tail` trims to the most recent; `| tac` flips to newest-first. Present a
+concise answer **citing specific entries** (id, context, type) — don't dump raw
+output. When "live" matters (excluding retracted entries), compose the live-view
+idiom first; a naive type/context filter still returns retracted rows.
 
 $ARGUMENTS
