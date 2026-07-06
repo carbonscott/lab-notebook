@@ -1,6 +1,6 @@
 ---
 name: lnb
-description: "Record and recall research notebook entries. Use when the user asks to record an observation, decision, dead-end, question, or milestone, or asks what we've tried / decided / hit. Trigger on: 'note this', 'log this', 'record', 'what have we tried', 'what did we decide', 'search the notebook'."
+description: "Record and recall research notebook entries. Use when the user asks to record an observation, decision, dead-end, question, or milestone, or asks what we've tried / decided / hit. Trigger the WRITE (Note) action on: 'note this', 'log this', 'record'. Trigger the READ (Recall) action on: 'recall', 'what have we tried', 'what did we decide', 'search the notebook'."
 user-invocable: true
 argument-hint: "<note|recall> [text...]"
 ---
@@ -13,10 +13,15 @@ whole notebook as JSONL) — so at this skill layer "log" is never a write; use
 **note**. The CLI (`lnb`) auto-discovers the notebook (nearest `.lnb/` walking
 up, or `$LNB_DIR`) and creates one on the first `note`. No setup step.
 
-Parse the intent of `$ARGUMENTS`: a request to record something (first word
-`note`/`record`, or clearly a new observation/decision/dead-end) → **Note**; a
-request to recall (first word `recall`, or a question about what was tried /
-decided) → **Recall**; if ambiguous, show the two usages below.
+Parse the intent of `$ARGUMENTS`. A request to record something — first word
+`note`/`log`/`record`, a phrasing like "log this"/"note this", or clearly a new
+observation/decision/dead-end → **Note** (the WRITE action; runs `lnb note …`).
+A request to recall — first word `recall`, "what did we / have we …", or a
+question about what was tried / decided → **Recall** (the READ action; runs
+`lnb log | jq …`). If ambiguous, show the two usages below. Note the split:
+the user saying "log this" means WRITE an entry (→ **Note**), whereas the *CLI*
+verb `lnb log` READS the whole notebook (see above) — at this skill layer "log"
+is never the write command, `lnb note` is.
 
 ## Note
 
