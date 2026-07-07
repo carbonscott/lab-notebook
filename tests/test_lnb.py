@@ -52,6 +52,13 @@ RECIPE_DEAD_BIND = 'map(select(.type=="_retract").retracts) as $dead'
 HAVE_JQ = shutil.which("jq") is not None
 needs_jq = pytest.mark.skipif(not HAVE_JQ, reason="jq is not installed")
 
+try:
+    import resource                         # POSIX-only; used to lower the child's
+except ImportError:                         # open-file limit in the fd-guard test
+    resource = None
+needs_resource = pytest.mark.skipif(
+    resource is None, reason="resource module unavailable (non-POSIX)")
+
 
 def run_lnb(args, cwd=WORKTREE, env=None):
     return subprocess.run(
@@ -445,6 +452,101 @@ def test_log_emits_all_ascending_across_writers(nb_env):
     ts_list = [o["ts"] for o in objs]
     assert ts_list == sorted(ts_list)
     assert [o["id"] for o in objs] == [a["id"], b["id"], c["id"], d["id"]]
+
+
+def test_log_equal_ts_tie_break_matches_stable_sort(nb_env):
+    """Equal-ts tie-break across and within writer files: `log`'s k-way merge
+    must order records ascending by ts and, for EQUAL ts, in file order (sorted
+    glob: earlier filename first) then line order -- byte-identical to Python's
+    STABLE sorted(key=ts), which is scan()'s contract. Includes a cross-file
+    equal-ts pair (same ts in w1 and w2) that only a stable, file-then-line
+    ordering resolves deterministically, plus a within-file equal-ts pair."""
+    nb_dir = Path(nb_env["LNB_DIR"])
+    nb_dir.mkdir(parents=True)
+
+    def rec(rid, ts, content):
+        return {"id": rid, "ts": ts, "writer": "w", "context": "c",
+                "type": "note", "content": content}
+
+    # w1: a within-file equal-ts pair (00:00:05, twice) and one record sharing a
+    # ts with w2 (00:00:10). w2: the cross-file twin at 00:00:10, then a later ts.
+    w1 = [
+        rec("id-w1-a", "2026-01-01T00:00:00+00:00", "w1 first"),
+        rec("id-w1-b", "2026-01-01T00:00:05+00:00", "w1 tie A"),
+        rec("id-w1-c", "2026-01-01T00:00:05+00:00", "w1 tie B"),   # within-file tie
+        rec("id-w1-d", "2026-01-01T00:00:10+00:00", "w1 crossfile tie"),
+    ]
+    w2 = [
+        rec("id-w2-a", "2026-01-01T00:00:10+00:00", "w2 crossfile tie"),  # ts == w1-d
+        rec("id-w2-b", "2026-01-01T00:00:20+00:00", "w2 later"),
+    ]
+    (nb_dir / "w1.jsonl").write_text("".join(json.dumps(r) + "\n" for r in w1))
+    (nb_dir / "w2.jsonl").write_text("".join(json.dumps(r) + "\n" for r in w2))
+
+    # Reference order: files concatenated in sorted-glob order (w1 then w2),
+    # line order preserved, then Python's STABLE sort by ts -- exactly what
+    # scan() yields and what the merge must reproduce byte-for-byte.
+    reference = sorted(w1 + w2, key=lambda e: e["ts"])
+    expected_ids = [r["id"] for r in reference]
+
+    objs = log_objs(nb_env)
+    obj_ids = [o["id"] for o in objs]
+    assert obj_ids == expected_ids
+    ts_list = [o["ts"] for o in objs]
+    assert ts_list == sorted(ts_list)
+    # the cross-file equal-ts pair resolves file-order-first: w1's twin precedes
+    # w2's -- the exact case a non-stable or wrong-order merge would flip.
+    assert obj_ids.index("id-w1-d") < obj_ids.index("id-w2-a")
+    # the within-file equal-ts pair keeps line order.
+    assert obj_ids.index("id-w1-b") < obj_ids.index("id-w1-c")
+
+
+@needs_resource
+def test_log_completeness_under_lowered_fd_limit(nb_env):
+    """fd-guard completeness (the regression pin): MANY single-record writer
+    files run under a LOWERED open-file limit push scan_stream past _fd_budget()
+    into the scan() fallback. `log` must still emit EVERY record, globally
+    ascending -- proving the guard never silently drops files at EMFILE.
+
+    Pre-fix (unguarded heapq.merge) DROPS the files it can't open: 100 files
+    with soft limit 64 -> _fd_budget()==32, so priming the merge would open
+    ~limit files before open() hits EMFILE, _iter_records would swallow it as an
+    OSError, and the rest would vanish from `log`. len(objs)==100 fails then."""
+    nb_dir = Path(nb_env["LNB_DIR"])
+    nb_dir.mkdir(parents=True)
+
+    n = 100
+    # one record per writer file, each a DISTINCT, ascending ts, so a complete
+    # emit is unambiguous: exactly n lines, strictly ascending.
+    for i in range(n):
+        ts = f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}+00:00"
+        r = {"id": f"id-{i:04d}", "ts": ts, "writer": f"w{i:04d}",
+             "context": "c", "type": "note", "content": f"entry {i}"}
+        (nb_dir / f"w{i:04d}.jsonl").write_text(json.dumps(r) + "\n")
+
+    hard = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+    soft = 64                                  # -> _fd_budget()==32 < 100 files
+
+    def lower_fd_limit():                       # runs in the child, pre-exec
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+    proc = subprocess.run(
+        [sys.executable, LNB_PY, "log"],
+        cwd=str(WORKTREE), env=nb_env,
+        capture_output=True, text=True, timeout=30,
+        preexec_fn=lower_fd_limit,
+    )
+    assert proc.returncode == 0, proc.stderr
+    objs = [json.loads(l) for l in proc.stdout.splitlines() if l.strip()]
+    # completeness: EVERY file's record present, none silently dropped.
+    assert len(objs) == n, (
+        f"expected all {n} records, got {len(objs)} -- files dropped at EMFILE")
+    assert {o["id"] for o in objs} == {f"id-{i:04d}" for i in range(n)}
+    ts_list = [o["ts"] for o in objs]
+    assert ts_list == sorted(ts_list)          # globally ascending
+    # the guard took the scan() fallback (one file at a time), so no file ever
+    # hit EMFILE -- _iter_records' "cannot read" warning must not appear.
+    assert "cannot read" not in proc.stderr
 
 
 def test_log_is_uncapped(nb_env):

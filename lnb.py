@@ -39,6 +39,10 @@ of your own -- lnb ships none by design.
 
 `log` sorts on the ISO ts STRING and assumes a stable UTC offset (a single-
 timezone notebook); cross-offset instant ordering is a documented limitation.
+Because `log` now streams a k-way merge over the per-writer files, it also
+assumes each file is already ts-ascending -- true for append-only single-writer
+files; a backward clock step or a hand-edit can violate it, and then that file's
+records emit in file order rather than globally sorted.
 
 Discovery: $LNB_DIR, else the nearest `.lnb/` walking up from the cwd, else
 `./.lnb` is created on the first `note`. Writer: $LNB_WRITER, else $USER.
@@ -54,6 +58,11 @@ import secrets
 import subprocess
 import sys
 from datetime import datetime
+
+try:
+    import resource               # POSIX-only; sizes scan_stream's fan-out
+except ImportError:               # pragma: no cover - non-POSIX
+    resource = None
 
 CORE = ("id", "ts", "writer", "context", "type", "content")  # lnb sets these
 RESERVED = set(CORE) | {"retracts", "reason"}                # writers may not
@@ -133,6 +142,30 @@ def _iter_records(path):
         warn(f"cannot read {path}: {e}")
 
 
+def _writer_files(nbdir):
+    """The notebook's per-writer JSONL files in stable (sorted) order -- the one
+    place scan() and scan_stream() agree on what to read and in what order."""
+    return sorted(glob.glob(os.path.join(nbdir, "*.jsonl")))
+
+
+def _fd_budget():
+    """How many writer files scan_stream may hold open at once. heapq.merge opens
+    ALL its inputs simultaneously, so a notebook with more writers than the
+    process open-file limit would make open() raise EMFILE mid-prime and silently
+    drop those files from `log`. Bound the fan-out by the soft limit (reserving a
+    margin for stdio); above it, log falls back to scan()'s one-file-at-a-time
+    sort. Non-POSIX (no resource module): a fixed conservative 128."""
+    if resource is None:
+        return 128
+    try:
+        soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (ValueError, OSError):     # pragma: no cover
+        return 128
+    if soft in (resource.RLIM_INFINITY, -1):
+        return 4096
+    return max(8, soft - 32)
+
+
 def scan(nbdir):
     """Scan every .lnb/*.jsonl -> (all records incl. `_retract` tombstones,
     ascending by ts string; the retracted id set).
@@ -145,7 +178,7 @@ def scan(nbdir):
     limitation, not a tested guarantee.
     """
     records, retracted = [], set()
-    for path in sorted(glob.glob(os.path.join(nbdir, "*.jsonl"))):
+    for path in _writer_files(nbdir):
         for rec in _iter_records(path):
             records.append(rec)                            # every record, verbatim
             if rec.get("type") == "_retract" and rec.get("retracts"):
@@ -163,9 +196,20 @@ def scan_stream(nbdir):
     sorted(glob) order, each with its equal-ts records contiguous, reproduces
     scan()'s stable-sort tie-break (file order, then line order) exactly. Used
     only by `log`; `retract` still uses scan() for the materialized set it needs.
+
+    heapq.merge holds ALL its inputs open at once, so a notebook with more writer
+    files than _fd_budget() would make open() hit EMFILE mid-prime -- _iter_records
+    would swallow it as an OSError and silently drop those files from `log`, whose
+    contract is to emit EVERY record. Guard the fan-out: above the budget, fall
+    back to scan()'s one-file-at-a-time load-and-sort. Correctness over memory --
+    never silently drop.
     """
+    files = _writer_files(nbdir)
+    if len(files) > _fd_budget():
+        records, _ = scan(nbdir)                 # correctness over memory: never
+        return iter(records)                     # silently drop files past EMFILE
     return heapq.merge(
-        *(_iter_records(p) for p in sorted(glob.glob(os.path.join(nbdir, "*.jsonl")))),
+        *(_iter_records(p) for p in files),
         key=lambda e: e.get("ts", ""),
     )
 
