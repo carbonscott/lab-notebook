@@ -5,9 +5,6 @@ is the consumer.** A notebook is not a database to configure; it is a directory
 of JSONL files you scan. One file, `lnb.py`, stdlib only, no index, no schema,
 no config, no dependencies.
 
-> This is the experimental *minimal* line (`dev-min`), distilled from the full
-> `lab-notebook` via a three-persona design review. See `design/`.
-
 ## Install
 
 ```bash
@@ -78,6 +75,23 @@ Want a closed vocabulary? Wrap `lnb note` in a small validator of your own —
 lnb ships none by design.
 Values may contain spaces (quote the whole `key=value` token); a quoted arg
 beginning `key=` is a field, not content — lead with the content string.
+
+A common use is attaching **references** — local files or a URL — as a
+comma-joined value, then splitting them back out with jq (lnb stores the string
+verbatim; jq does the post-processing):
+
+```bash
+lnb note "reviewed the masking sweep" \
+    artifacts="/cwd/sweep.md,https://docs.google.com/spreadsheets/d/<id>"
+
+lnb log | jq -r 'select(.id=="20260707T162915-124b206e")
+  | .artifacts | split(",") | .[]'
+# /cwd/sweep.md
+# https://docs.google.com/spreadsheets/d/<id>
+```
+
+`artifacts` is not special — it is an ordinary `key=value` field, and the
+comma-join is just a convention jq unpacks, not a list lnb parses.
 
 ## The honest tradeoff
 
