@@ -99,3 +99,5 @@ Every read is O(all entries) and nothing validates fields — fine at 10^4 entri
 a lie at 10^7. The escalation path when a scan outgrows the terminal is not a
 second query language; it is `lnb log | jq '…'`, and for the full-power case,
 `jq` directly over `.lnb/*.jsonl`.
+
+For a cookbook of those direct-access recipes — `grep` point-lookups, `jq` projections and filters, and an optional throwaway SQLite index for read-heavy bursts — see [examples/retrieval.md](examples/retrieval.md).
