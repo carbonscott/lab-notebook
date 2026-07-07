@@ -50,6 +50,15 @@ append-only, so a wrong entry stays as history.
    (`id`, `ts`, `writer`, `context`, `type`, `content`) or start with `_`; lnb
    rejects those, so just use `--context`/`--type` for those.
 
+   A common use is attaching **references** — local files or a URL — as a
+   comma-joined value; lnb stores the string verbatim and jq unpacks it on read
+   (see Recall). `artifacts` is not special, just an ordinary field:
+
+   ```bash
+   lnb note "reviewed the masking sweep" \
+       artifacts="/cwd/sweep.md,https://docs.google.com/spreadsheets/d/<id>"
+   ```
+
    After logging, **surface the echoed entry id** to the user (the `noted <id>`
    line) — it's what a later `retract` needs.
 
@@ -72,6 +81,7 @@ lnb log | jq 'select(.content|test("masking";"i"))'  # regex over content
 lnb log | jq 'select(.context=="ssl/pretraining")'  # filter by context
 lnb log | jq 'select(.id|test("a7f2c3d1"))'          # fetch one entry by id
 lnb log | jq -r '[.ts,.type,.content]|@tsv'          # project to a table
+lnb log | jq -r 'select(.artifacts).artifacts|split(",")[]'  # unpack an artifacts list
 lnb log | jq -s 'group_by(.type)|map({(.[0].type):length})'  # aggregate counts
 
 # LIVE view — drop tombstones and the entries they retract (also in `lnb --help`);
