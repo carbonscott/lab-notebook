@@ -83,13 +83,15 @@ grep -h -F 'AUROC' .lnb/*.jsonl | jq -c 'select(.type=="observation")'
 {"id":"20260707T211152-9ceb94eb","ts":"2026-07-07T21:11:52+00:00","writer":"cong","context":"ssl/eval","type":"observation","content":"baseline AUROC 0.91 on holdout","metric":"auroc","value":"0.91"}
 ```
 
-The speedup is real: on a 1,000,016-record / 191 MB notebook, one id lookup ran in
-**0.04 s** as `grep -F … | jq` versus **2.2 s** for a bare `jq 'select(.id==…)'`
-full scan — about **55× faster**, because `grep` never builds a parse tree for the
-999,999 lines it discards. (`grep` alone can only match raw bytes; the moment you
-need field logic — a specific `.type`, a comparison — `jq` still does that part.
-For a literal id, `grep` alone from *Point-lookup by id* is enough.) If you are
-doing *many* lookups rather than one, build the index under *Read-heavy bursts*.
+The speedup is real: on a 1,000,016-record / 191 MB notebook, this same shape —
+`grep -F '<phrase>' | jq 'select(.type==…)'` for a phrase occurring in a single
+record — ran in **0.06 s** versus **~2.5 s** for the equivalent bare
+`jq 'select(.content|contains("<phrase>"))'` full scan: about **40× faster**,
+because `grep` discarded all but the one matching line before `jq` parsed anything.
+(`grep` alone can only match raw bytes; the moment you need field logic — a specific
+`.type`, a comparison — `jq` still does that part. For a literal id, `grep` alone
+from *Point-lookup by id* is enough.) If you are doing *many* lookups rather than
+one, build the index under *Read-heavy bursts*.
 
 ## Project fields to a table — `jq`
 
@@ -207,6 +209,11 @@ Load each JSONL line into a `jsonb` column (binary JSON — smaller and faster t
 decode than text `json`) and index only the fields you'll seek on. A tiny
 stdlib-only loader is the most robust way to get raw lines in:
 
+> **Prerequisite:** `jsonb()` needs `sqlite3` ≥ 3.45.0 (Jan 2024) — check with
+> `sqlite3 --version`. On an older `sqlite3`, swap `JSONB`/`jsonb(?)` for
+> `JSON`/`json(?)` (text storage): every recipe below works unchanged, just
+> without the binary-format speed and size win.
+
 ```bash
 python3 - .lnb notebook.db <<'PY'
 import glob, json, sqlite3, sys
@@ -267,6 +274,7 @@ rm notebook.db
 index (load + three indexes) took **5.4 s**, and each id lookup then took **~1.5 ms**
 — versus **~2.2 s** for a `jq 'select(.id==…)'` full scan and **~5.7 s** for
 `lnb log | jq 'select(.id==…)'` (which sorts all million records first). The build
-costs about the same as a *single* `lnb log | jq` call, so any burst of two or more
-lookups already comes out ahead, and every lookup after that is ~1000× cheaper. For
-a handful of lookups, don't bother — use `grep` or `jq` above.
+costs about the same as a *single* `lnb log | jq` call, so it pays for itself in
+**under one lookup** against that path — or about **three** against a bare `jq` full
+scan (5.4 s build vs 3 × 2.2 s). Past break-even, each lookup is ~1,500–3,800×
+cheaper. For just a handful of lookups, don't bother — use `grep` or `jq` above.
