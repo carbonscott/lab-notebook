@@ -45,6 +45,8 @@ Discovery: $LNB_DIR, else the nearest `.lnb/` walking up from the cwd, else
 """
 import difflib
 import glob
+import heapq
+import itertools
 import json
 import os
 import re
@@ -105,6 +107,32 @@ def default_context():
 
 # --- the single read path & the single write path ---------------------------
 
+def _iter_records(path):
+    """Yield each record (a dict) from one .lnb/*.jsonl file, verbatim, skipping
+    blank lines. Fails closed per line -- a malformed line or a valid-JSON-but-
+    non-object (scalar/array) line is skipped with a warning, never crashes a
+    read. Shared by scan() and scan_stream() so both read a file identically.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for lineno, line in enumerate(fh, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    warn(f"skipping malformed line {os.path.basename(path)}:{lineno}")
+                    continue
+                if not isinstance(rec, dict):              # valid JSON, but a
+                    warn(f"skipping non-object line "      # scalar/array is not
+                         f"{os.path.basename(path)}:{lineno}")  # a record -- fail
+                    continue                               # closed, never crash
+                yield rec                                  # every record, verbatim
+    except OSError as e:
+        warn(f"cannot read {path}: {e}")
+
+
 def scan(nbdir):
     """Scan every .lnb/*.jsonl -> (all records incl. `_retract` tombstones,
     ascending by ts string; the retracted id set).
@@ -118,28 +146,28 @@ def scan(nbdir):
     """
     records, retracted = [], set()
     for path in sorted(glob.glob(os.path.join(nbdir, "*.jsonl"))):
-        try:
-            with open(path, encoding="utf-8") as fh:
-                for lineno, line in enumerate(fh, 1):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        warn(f"skipping malformed line {os.path.basename(path)}:{lineno}")
-                        continue
-                    if not isinstance(rec, dict):              # valid JSON, but a
-                        warn(f"skipping non-object line "      # scalar/array is not
-                             f"{os.path.basename(path)}:{lineno}")  # a record -- fail
-                        continue                               # closed, never crash
-                    records.append(rec)                        # every record, verbatim
-                    if rec.get("type") == "_retract" and rec.get("retracts"):
-                        retracted.add(rec["retracts"])
-        except OSError as e:
-            warn(f"cannot read {path}: {e}")
+        for rec in _iter_records(path):
+            records.append(rec)                            # every record, verbatim
+            if rec.get("type") == "_retract" and rec.get("retracts"):
+                retracted.add(rec["retracts"])
     records = sorted(records, key=lambda e: e.get("ts", ""))    # ascending, no reverse=
     return records, retracted
+
+
+def scan_stream(nbdir):
+    """Stream all records ascending by ts via a k-way merge over the per-writer
+    files. Each file is already ts-ascending (append-only), so heapq.merge yields
+    a globally sorted stream in O(k) memory -- k open files -- vs scan()'s O(n)
+    load-and-sort. For records with equal ts, heapq.merge yields the earlier
+    iterable's items first (tie broken by iterable index); passing files in
+    sorted(glob) order, each with its equal-ts records contiguous, reproduces
+    scan()'s stable-sort tie-break (file order, then line order) exactly. Used
+    only by `log`; `retract` still uses scan() for the materialized set it needs.
+    """
+    return heapq.merge(
+        *(_iter_records(p) for p in sorted(glob.glob(os.path.join(nbdir, "*.jsonl")))),
+        key=lambda e: e.get("ts", ""),
+    )
 
 
 def append(nbdir, record):
@@ -232,12 +260,13 @@ def cmd_log(args):
         print('no notebook found here. Start one with:  lnb note "..."',
               file=sys.stderr)
         return
-    records, _ = scan(nbdir)
-    if not records:
+    stream = scan_stream(nbdir)                 # O(k) k-way merge, not a full load
+    first = next(stream, None)                  # peek: empty notebook -> nudge
+    if first is None:
         print(f'notebook at {nbdir} is empty -- nothing logged yet.\n'
               f'Start with:  lnb note "..."', file=sys.stderr)
         return
-    emit_json(records)
+    emit_json(itertools.chain([first], stream))  # emit_json iterates lazily
 
 
 def cmd_retract(args):
